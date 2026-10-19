@@ -51,6 +51,9 @@ jobs:
       - name: Resolve Flutter and CocoaPods packages
         run: flutter pub get --enforce-lockfile
 
+      - name: Refresh the Sentry CocoaPods lock for dependency resolution
+        run: cd ios && pod update Sentry/HybridSDK --repo-update
+
       - name: Confirm the committed lockfile is current
         run: git diff --exit-code -- pubspec.lock
 
@@ -71,6 +74,9 @@ jobs:
           xcrun simctl bootstatus "$device_id" -b
           flutter test integration_test/app_smoke_test.dart -d "$device_id" --reporter expanded
 
+      - name: Confirm the committed CocoaPods lockfile is current
+        run: git diff --exit-code -- ios/Podfile.lock
+
       - name: Collect iOS simulator app and logs
         if: always()
         run: |
@@ -86,6 +92,7 @@ jobs:
           name: ios-simulator-${{ github.run_id }}
           path: |
             apps/fieldops_mobile/pubspec.lock
+            apps/fieldops_mobile/ios/Podfile.lock
             ${{ runner.temp }}/ios-simulator-app.zip
             ${{ runner.temp }}/ios-simulators.log
           if-no-files-found: ignore
