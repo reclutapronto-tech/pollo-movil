@@ -24,7 +24,9 @@ concurrency:
 
 jobs:
   android:
-    runs-on: ubuntu-24.04
+    # Ubuntu 24.04 runners are currently hanging with QEMU in the Android emulator.
+    # Pin to 22.04 while the upstream runner issue remains open.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     defaults:
       run:
@@ -89,6 +91,7 @@ jobs:
 
       - name: Run app on Android emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        timeout-minutes: 20
         with:
           api-level: 36
           target: google_apis
