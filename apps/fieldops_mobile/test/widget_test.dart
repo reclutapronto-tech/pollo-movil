@@ -29,7 +29,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await Supabase.initialize(
       url: 'http://127.0.0.1:54321',
-      publishableKey: 'local-widget-test-key',
+      anonKey: 'local-widget-test-key',
     );
   });
 
