@@ -43,7 +43,7 @@ jobs:
           haskell: true
           large-packages: false
           docker-images: true
-          preinstalled-runtimes: false
+          preinstalled-runtimes: true
           swap-storage: false
 
       - name: Set up Flutter
