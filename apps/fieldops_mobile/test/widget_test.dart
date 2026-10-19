@@ -107,17 +107,17 @@ void main() {
     expect(initialNavigation.destinations, hasLength(5));
     expect(initialNavigation.selectedIndex, 0);
 
-    await tester.tap(find.text(initialNavigation.destinations[1].label));
+    final initialLabels = _navigationLabels(tester);
+    expect(initialLabels, hasLength(5));
+    await tester.tap(find.text(initialLabels[1]));
     await tester.pumpAndSettle();
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
       1,
     );
 
-    final currentNavigation = tester.widget<NavigationBar>(
-      find.byType(NavigationBar),
-    );
-    await tester.tap(find.text(currentNavigation.destinations[3].label));
+    final currentLabels = _navigationLabels(tester);
+    await tester.tap(find.text(currentLabels[3]));
     await tester.pumpAndSettle();
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
@@ -125,6 +125,17 @@ void main() {
     );
   });
 }
+
+List<String> _navigationLabels(WidgetTester tester) => tester
+    .widgetList<Text>(
+      find.descendant(
+        of: find.byType(NavigationBar),
+        matching: find.byType(Text),
+      ),
+    )
+    .map((widget) => widget.data)
+    .whereType<String>()
+    .toList();
 
 const _configuredEnvironment = FieldOpsEnvironment(
   supabaseUrl: 'http://127.0.0.1:54321',
