@@ -20,12 +20,23 @@ import 'package:fieldops_mobile/features/schedule/domain/worker_schedule_shift.d
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(() async {
+    SharedPreferences.setMockInitialValues({});
+    await Supabase.initialize(
+      url: 'http://127.0.0.1:54321',
+      publishableKey: 'local-widget-test-key',
+    );
+  });
+
   testWidgets('shows configuration screen when Supabase env is missing', (
     tester,
   ) async {
-    _usePhoneViewport(tester);
+    _usePhoneViewport(tester, size: const Size(320, 480));
     await tester.pumpWidget(
       _buildTestApp(
         environment: const FieldOpsEnvironment(
@@ -388,8 +399,11 @@ void main() {
   });
 }
 
-void _usePhoneViewport(WidgetTester tester) {
-  tester.view.physicalSize = const Size(430, 932);
+void _usePhoneViewport(
+  WidgetTester tester, {
+  Size size = const Size(430, 932),
+}) {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -407,7 +421,7 @@ Widget _buildTestApp({
     overrides: [
       fieldOpsEnvironmentProvider.overrideWithValue(environment),
       authRepositoryProvider.overrideWithValue(repository),
-      // Stub Supabase-dependent providers so tests never call Supabase.instance.
+      // Keep role data deterministic; the Supabase SDK uses loopback in tests.
       userRoleProvider.overrideWithValue(UserRole.worker),
       // Use an in-memory Drift database — avoids FlutterSecureStorage + SQLCipher
       // which are unavailable in the test environment.
