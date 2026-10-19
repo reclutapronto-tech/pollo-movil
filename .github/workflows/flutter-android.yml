@@ -44,7 +44,7 @@ jobs:
           cache-key: flutter-3.47.7
 
       - name: Resolve locked packages
-        run: flutter pub get
+        run: flutter pub get --enforce-lockfile
 
       - name: Confirm the committed lockfile is current
         run: git diff --exit-code -- pubspec.lock
