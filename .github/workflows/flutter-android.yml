@@ -1,0 +1,87 @@
+name: Flutter - Android
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/flutter-android.yml"
+      - "apps/fieldops_mobile/**"
+      - "!apps/fieldops_mobile/**/*.md"
+  push:
+    branches: [pollo-movil]
+    paths:
+      - ".github/workflows/flutter-android.yml"
+      - "apps/fieldops_mobile/**"
+      - "!apps/fieldops_mobile/**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/fieldops_mobile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+          cache-key: flutter-3.47.7
+
+      - name: Resolve locked packages
+        run: flutter pub get --enforce-lockfile
+
+      - name: Static analysis
+        run: flutter analyze --fatal-infos
+
+      - name: Unit and widget tests
+        run: flutter test --reporter expanded
+
+      - name: Build Android APK
+        run: flutter build apk --debug
+
+      - name: Run app on Android emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: |
+            cd "$GITHUB_WORKSPACE/apps/fieldops_mobile"
+            adb logcat -c
+            adb install -r build/app/outputs/flutter-apk/app-debug.apk
+            flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded
+
+      - name: Collect Android emulator log
+        if: always()
+        run: |
+          if adb get-state >/dev/null 2>&1; then
+            adb logcat -d > "$RUNNER_TEMP/android-emulator.log"
+          fi
+
+      - name: Save Android build and emulator logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-build-${{ github.run_id }}
+          path: |
+            apps/fieldops_mobile/build/app/outputs/flutter-apk/app-debug.apk
+            ${{ runner.temp }}/android-emulator.log
+          if-no-files-found: ignore
+          retention-days: 14

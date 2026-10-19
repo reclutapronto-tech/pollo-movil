@@ -1,0 +1,118 @@
+name: Timefold - Solver service
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/timefold-solver.yml"
+      - "infra/timefold/**"
+      - "!infra/timefold/**/*.md"
+  push:
+    branches: [pollo-movil]
+    paths:
+      - ".github/workflows/timefold-solver.yml"
+      - "infra/timefold/**"
+      - "!infra/timefold/**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  solver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Ensure Maven is available
+        run: |
+          if ! command -v mvn >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y maven
+          fi
+          java -version
+          mvn --version
+
+      - name: Compile and run Timefold solver tests
+        working-directory: infra/timefold
+        run: mvn --batch-mode --no-transfer-progress verify
+
+      - name: Build and start the real Timefold container
+        run: |
+          docker network create pollo-movil-local
+          timefold_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$timefold_token"
+          printf 'TIMEFOLD_API_TOKEN=%s\n' "$timefold_token" > "$RUNNER_TEMP/timefold.env"
+          chmod 600 "$RUNNER_TEMP/timefold.env"
+          printf 'TIMEFOLD_API_TOKEN=%s\n' "$timefold_token" >> "$GITHUB_ENV"
+          docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml up --build --detach
+
+      - name: Prove token enforcement and a real solver result
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if status="$(curl --silent --show-error --max-time 2 --output /dev/null --write-out '%{http_code}' \
+              http://127.0.0.1:18088/api/assignments/health)"; then
+              if [ "$status" = "200" ]; then break; fi
+            else
+              status=000
+            fi
+            sleep 2
+          done
+          test "$status" = "200"
+          unauthenticated_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Content-Type: application/json' \
+            --data '{"candidates":[],"units":[]}' \
+            http://127.0.0.1:18088/api/assignments/solve)"
+          test "$unauthenticated_status" = "401"
+          curl --silent --show-error --fail \
+            --header "Authorization: Bearer $TIMEFOLD_API_TOKEN" \
+            --header 'Content-Type: application/json' \
+            --data '{"candidates":[{"id":"ci-cook","positionIds":["cook"],"onShift":true,"onBreak":false,"absent":false,"servingCustomers":false,"capacityMinutes":20,"assignedWeightedMinutes":0,"recentHeavyTasks":0,"rotationRank":0}],"units":[{"id":"ci-task","groupId":"ci-task","requiredPositionIds":["cook"],"estimatedMinutes":10,"difficulty":2,"priority":3,"interruptible":true}],"weights":{"loadBalanceWeight":100,"heavyRotationWeight":60,"priorityWeight":100}}' \
+            http://127.0.0.1:18088/api/assignments/solve > "$RUNNER_TEMP/timefold-result.json"
+          jq -e '.assignments | length == 1 and .[0].candidateId == "ci-cook"' "$RUNNER_TEMP/timefold-result.json"
+
+      - name: Save Maven and Timefold artifacts
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/timefold-artifacts"
+          if [ -d infra/timefold/target ]; then
+            cp -a infra/timefold/target "$RUNNER_TEMP/timefold-artifacts/"
+          fi
+          if [ -f "$RUNNER_TEMP/timefold-result.json" ]; then
+            cp "$RUNNER_TEMP/timefold-result.json" "$RUNNER_TEMP/timefold-artifacts/"
+          fi
+          if docker ps -a --format '{{.Names}}' | grep -qx 'pollo-movil-timefold'; then
+            docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml logs --no-color > "$RUNNER_TEMP/timefold-artifacts/timefold.log" 2>&1
+          fi
+
+      - name: Upload solver test reports and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: timefold-reports-${{ github.run_id }}
+          path: ${{ runner.temp }}/timefold-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Stop isolated Timefold service
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/timefold.env" ]; then
+            docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml down --volumes
+          fi
