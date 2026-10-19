@@ -51,9 +51,6 @@ jobs:
       - name: Resolve Flutter and CocoaPods packages
         run: flutter pub get --enforce-lockfile
 
-      - name: Refresh the Sentry CocoaPods lock for dependency resolution
-        run: cd ios && pod update Sentry/HybridSDK --repo-update
-
       - name: Confirm the committed lockfile is current
         run: git diff --exit-code -- pubspec.lock
 
