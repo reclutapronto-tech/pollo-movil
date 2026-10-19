@@ -19,10 +19,6 @@ const buttonClass = "inline-flex min-h-10 items-center justify-center gap-2 roun
 const secondaryClass = "inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-stone-300 px-3 text-sm font-semibold hover:bg-stone-50 dark:border-slate-700 dark:hover:bg-slate-800";
 const resultLabels: Record<string, string> = { ok: "Correcto", needs_attention: "Requiere atención", not_applicable: "No aplica" };
 
-function rows(value: unknown): Row[] {
-  return Array.isArray(value) ? value.filter((item): item is Row => typeof item === "object" && item !== null && !Array.isArray(item)) : [];
-}
-
 function todayInZone(timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
