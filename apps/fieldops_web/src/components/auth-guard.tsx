@@ -20,7 +20,12 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isPasswordResetRoute = pathname === "/reset-password";
-  const isPolloRoute = pathname === "/restaurant" || pathname.startsWith("/restaurant/") || isPasswordResetRoute;
+  const isPublicGalleryRoute = pathname.startsWith("/g/");
+  const isPolloRoute =
+    pathname === "/restaurant" ||
+    pathname.startsWith("/restaurant/") ||
+    isPasswordResetRoute ||
+    isPublicGalleryRoute;
 
   useEffect(() => {
     let mounted = true;
@@ -95,7 +100,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session && !isPasswordResetRoute) {
+  if (!session && !isPasswordResetRoute && !isPublicGalleryRoute) {
     return (
       <div className="mx-auto mt-20 max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-card p-8 shadow-sm">
