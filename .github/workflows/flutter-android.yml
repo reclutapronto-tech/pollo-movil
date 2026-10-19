@@ -35,6 +35,17 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Free disk space without removing Android SDK
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          preinstalled-runtimes: false
+          swap-storage: false
+
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
@@ -59,10 +70,16 @@ jobs:
         run: |
           echo "Disk space before Android build:"
           df -h "$GITHUB_WORKSPACE"
-          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$sdk_root" ]; then
+            echo "::error::Android SDK was not found at $sdk_root"
+            exit 1
+          fi
           if [ -n "$sdk_root" ] && [ -d "$sdk_root/system-images" ]; then
             du -sh "$sdk_root/system-images"
             rm -rf -- "$sdk_root/system-images"
+          else
+            echo "No preinstalled emulator images found at $sdk_root/system-images"
           fi
           echo "Disk space after removing unused preinstalled images:"
           df -h "$GITHUB_WORKSPACE"
