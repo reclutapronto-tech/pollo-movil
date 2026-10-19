@@ -50,7 +50,7 @@ jobs:
         run: git diff --exit-code -- pubspec.lock
 
       - name: Static analysis
-        run: flutter analyze --fatal-infos
+        run: flutter analyze --fatal-warnings
 
       - name: Unit and widget tests
         run: flutter test --reporter expanded

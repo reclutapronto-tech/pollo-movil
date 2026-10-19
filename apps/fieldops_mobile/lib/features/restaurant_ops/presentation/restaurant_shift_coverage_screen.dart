@@ -238,7 +238,7 @@ class _RestaurantShiftCoverageScreenState
                             child: FilledButton.icon(
                               onPressed: _busyId != null || selectedShiftId == null
                                   ? null
-                                  : () => _submitRequest(selectedShiftId!),
+                                  : () => _submitRequest(selectedShiftId),
                               icon: _busyId == 'new'
                                   ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
                                   : const Icon(Icons.send_rounded),

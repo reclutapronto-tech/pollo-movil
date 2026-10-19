@@ -1204,7 +1204,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       _InfoCard(text: l10n.restaurantOpsWasteIntro),
       if (hasPendingReview)
         _InfoCard(
-          text: pendingReview?['needs_attention'] == true
+          text: pendingReview['needs_attention'] == true
               ? l10n.restaurantOpsWasteNeedsAttention
               : l10n.restaurantOpsWastePendingSync,
         ),
