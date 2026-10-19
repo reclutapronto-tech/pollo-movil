@@ -1,0 +1,37 @@
+# Environment — never commit real keys
+.env
+.env.local
+.env*.local
+.env.release
+apps/fieldops_mobile/env/*.json
+!apps/fieldops_mobile/env/*.example.json
+
+# Supabase
+.supabase
+infra/supabase/.branches/
+infra/supabase/.temp/
+
+# Dependencies
+node_modules
+
+# Claude local session data
+.claude/
+.claude-flow/
+**/.claude-flow/
+
+# Supabase CLI ephemeral state
+supabase/.temp/
+
+# macOS
+**/.DS_Store
+
+# Python
+execution/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Docs / binaries not suited for git
+FieldOps_AI_Complete_Plan_2026_v5.docx
+OldAgentoberemoved.md
+.gstack/
+apps/fieldops_mobile/run.sh

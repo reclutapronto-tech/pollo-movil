@@ -1,0 +1,58 @@
+{
+  "@@locale": "es",
+  "appTitle": "FieldOps AI",
+  "signIn": "Iniciar sesión",
+  "signOut": "Cerrar sesión",
+  "email": "Correo electrónico",
+  "password": "Contraseña",
+  "emailRequired": "El correo es obligatorio.",
+  "emailInvalid": "Ingresa un correo válido.",
+  "passwordRequired": "La contraseña es obligatoria.",
+  "signInFailed": "Error al iniciar sesión. Verifica tus credenciales y conexión.",
+  "assignedJobs": "Trabajos asignados",
+  "noJobsYet": "Sin trabajos asignados",
+  "pullToRefresh": "Desliza para actualizar cuando un supervisor asigne trabajo.",
+  "clockIn": "Registrar entrada",
+  "clockOut": "Registrar salida",
+  "clockedIn": "En servicio",
+  "readyToClockIn": "Listo para registrar",
+  "startBreak": "Iniciar descanso",
+  "endBreak": "Terminar descanso",
+  "onBreak": "En descanso",
+  "requestOT": "Solicitar horas extra",
+  "takePhoto": "Foto",
+  "tasks": "{count} tareas",
+  "@tasks": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "taskChecklist": "Lista de tareas",
+  "proofPhoto": "Foto de evidencia",
+  "beforePhoto": "Foto ANTES",
+  "afterPhoto": "Foto DESPUÉS",
+  "capturing": "Capturando...",
+  "uploading": "Subiendo foto de evidencia...",
+  "finalizing": "Finalizando...",
+  "photoUploaded": "Foto subida exitosamente",
+  "retry": "Reintentar",
+  "cancel": "Cancelar",
+  "offline": "Sin conexión",
+  "eventsQueued": "{count, plural, =1{1 evento en cola} other{{count} eventos en cola}}",
+  "@eventsQueued": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "submitOTRequest": "Enviar solicitud de horas extra",
+  "overtimeAlert": "Estás entrando en horas extra",
+  "hoursWorked": "Horas trabajadas hasta ahora",
+  "reasonForOvertime": "Razón de las horas extra",
+  "mySchedule": "Mi horario",
+  "upcomingShifts": "Próximos turnos",
+  "scheduleHelp": "Turnos publicados para las próximas dos semanas. Desliza para actualizar si un supervisor cambia tu horario.",
+  "updated": "Actualizado",
+  "noScheduledShiftsYet": "Todavía no hay turnos programados",
+  "scheduleWillAppear": "Los turnos publicados aparecerán aquí cuando tu supervisor envíe el horario.",
+  "scheduleUnavailable": "Horario no disponible"
+}

@@ -1,0 +1,924 @@
+openapi: 3.1.1
+info:
+  title: FieldOps AI - Edge & Orchestration API
+  version: 2.0.0
+  summary: Production-grade Edge Functions and orchestration endpoints
+  description: >
+    Canonical API definitions for custom Supabase Edge Functions and internal orchestration services.
+    Standard CRUD is handled by Supabase PostgREST and RLS-backed tables.
+    This spec defines complex workflows, async dispatch routes, sync endpoints, media upload orchestration,
+    and immutable event-related service operations.
+
+servers:
+  - url: https://api.fieldops.ai/v1
+    description: Production
+  - url: http://localhost:54321/functions/v1
+    description: Local Supabase Edge environment
+
+tags:
+  - name: Sync
+  - name: Jobs
+  - name: Overtime
+  - name: Media
+  - name: Reports
+  - name: Internal
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Standard Supabase Auth JWT. Company scoping and access are validated server-side
+        against authenticated user context and tenant authorization rules.
+
+  parameters:
+    XRequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Optional caller-provided correlation ID for tracing across services.
+      schema:
+        type: string
+        maxLength: 128
+
+    XClientVersion:
+      name: X-Client-Version
+      in: header
+      required: false
+      description: Mobile or web client version for compatibility checks and debugging.
+      schema:
+        type: string
+        maxLength: 64
+        example: "mobile-1.3.2"
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Unique key used to make non-idempotent POST operations safely retryable.
+        Required on sync, OT, report-generation, and orchestration-dispatch endpoints.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 255
+        example: "8a6b4f53-3fa0-4b55-baa8-d8f6df31833d"
+
+  headers:
+    XRequestID:
+      description: Server-generated or echoed request correlation ID.
+      schema:
+        type: string
+
+    XRateLimitLimit:
+      description: Max requests allowed in the current window.
+      schema:
+        type: integer
+
+    XRateLimitRemaining:
+      description: Requests remaining in the current window.
+      schema:
+        type: integer
+
+    XRateLimitReset:
+      description: UNIX epoch seconds when the current rate-limit window resets.
+      schema:
+        type: integer
+
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+
+    Timestamp:
+      type: string
+      format: date-time
+
+    Date:
+      type: string
+      format: date
+
+    Lat:
+      type: number
+      format: double
+      minimum: -90
+      maximum: 90
+
+    Lng:
+      type: number
+      format: double
+      minimum: -180
+      maximum: 180
+
+    GPSPoint:
+      type: object
+      additionalProperties: false
+      properties:
+        lat:
+          $ref: '#/components/schemas/Lat'
+        lng:
+          $ref: '#/components/schemas/Lng'
+        accuracy_m:
+          type: number
+          format: float
+          minimum: 0
+      required: [lat, lng]
+
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+        value:
+          description: Optional problematic value.
+      required: [issue]
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: error
+        error_code:
+          type: string
+          example: INVALID_PAYLOAD
+        message:
+          type: string
+          example: Request validation failed.
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+        request_id:
+          type: string
+      required: [status, error_code, message]
+
+    SuccessAck:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: success
+        message:
+          type: string
+        request_id:
+          type: string
+      required: [status]
+
+    AcceptedAck:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: accepted
+        message:
+          type: string
+        request_id:
+          type: string
+        job_id:
+          $ref: '#/components/schemas/UUID'
+      required: [status, request_id]
+
+    SyncClockEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - job_id
+        - event_subtype
+        - occurred_at
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+          description: Client-generated UUID for deduplication.
+        job_id:
+          $ref: '#/components/schemas/UUID'
+        event_subtype:
+          type: string
+          enum: [clock_in, clock_out, break_start, break_end]
+        occurred_at:
+          $ref: '#/components/schemas/Timestamp'
+        gps:
+          $ref: '#/components/schemas/GPSPoint'
+        task_classification:
+          type: string
+          maxLength: 128
+        rate_code:
+          type: string
+          maxLength: 128
+        notes:
+          type: string
+          maxLength: 1000
+
+    SyncPhotoEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - media_asset_id
+        - occurred_at
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+          description: Client-generated UUID for deduplication.
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+        job_id:
+          $ref: '#/components/schemas/UUID'
+        task_id:
+          $ref: '#/components/schemas/UUID'
+        occurred_at:
+          $ref: '#/components/schemas/Timestamp'
+        gps:
+          $ref: '#/components/schemas/GPSPoint'
+        is_checkpoint:
+          type: boolean
+          default: false
+        photo_role:
+          type: string
+          example: checkpoint_before
+
+    SyncBatchPayload:
+      type: object
+      additionalProperties: false
+      required:
+        - batch_id
+        - clock_events
+      properties:
+        batch_id:
+          $ref: '#/components/schemas/UUID'
+          description: Client-generated batch ID for safe retry/replay protection.
+        device_id:
+          $ref: '#/components/schemas/UUID'
+        submitted_at:
+          $ref: '#/components/schemas/Timestamp'
+        clock_events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/SyncClockEvent'
+        photo_events:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/SyncPhotoEvent'
+          description: Reserved for a later sync expansion. Sprint 1 currently accepts clock_events only.
+
+    SyncRejectedItem:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          $ref: '#/components/schemas/UUID'
+        reason:
+          type: string
+          example: invalid_geofence
+        message:
+          type: string
+      required: [id, reason]
+
+    SyncResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: success
+        batch_id:
+          $ref: '#/components/schemas/UUID'
+        accepted:
+          type: array
+          items:
+            $ref: '#/components/schemas/UUID'
+        duplicates:
+          type: array
+          items:
+            $ref: '#/components/schemas/UUID'
+        rejected:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncRejectedItem'
+        server_time:
+          $ref: '#/components/schemas/Timestamp'
+        request_id:
+          type: string
+      required: [status, batch_id, accepted, duplicates, rejected, server_time]
+
+    ActiveJobContext:
+      type: object
+      additionalProperties: false
+      properties:
+        jobs:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              job_id:
+                $ref: '#/components/schemas/UUID'
+              job_name:
+                type: string
+              geofence:
+                type: object
+                additionalProperties: false
+                properties:
+                  lat:
+                    $ref: '#/components/schemas/Lat'
+                  lng:
+                    $ref: '#/components/schemas/Lng'
+                  radius_m:
+                    type: integer
+                    minimum: 1
+                required: [lat, lng, radius_m]
+              tasks:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    task_id:
+                      $ref: '#/components/schemas/UUID'
+                    name:
+                      type: string
+                    requires_photo:
+                      type: boolean
+                  required: [task_id, name, requires_photo]
+        fetched_at:
+          $ref: '#/components/schemas/Timestamp'
+      required: [jobs, fetched_at]
+
+    OTRequestPayload:
+      type: object
+      additionalProperties: false
+      required: [job_id, request_photo_event_id]
+      properties:
+        job_id:
+          $ref: '#/components/schemas/UUID'
+        request_photo_event_id:
+          $ref: '#/components/schemas/UUID'
+        notes:
+          type: string
+          maxLength: 1000
+
+    OTRequestResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: success
+        ot_request_id:
+          $ref: '#/components/schemas/UUID'
+        request_id:
+          type: string
+      required: [status, ot_request_id]
+
+    OTApprovalPayload:
+      type: object
+      additionalProperties: false
+      required: [ot_request_id, decision]
+      properties:
+        ot_request_id:
+          $ref: '#/components/schemas/UUID'
+        decision:
+          type: string
+          enum: [approved, denied]
+        reason:
+          type: string
+          maxLength: 1000
+      allOf:
+        - if:
+            properties:
+              decision:
+                const: denied
+          then:
+            required: [reason]
+
+    MediaPresignPayload:
+      type: object
+      additionalProperties: false
+      required: [job_id, mime_type, file_size_bytes]
+      properties:
+        job_id:
+          $ref: '#/components/schemas/UUID'
+        task_id:
+          $ref: '#/components/schemas/UUID'
+        mime_type:
+          type: string
+          example: image/jpeg
+        file_size_bytes:
+          type: integer
+          minimum: 1
+          maximum: 15728640
+        captured_at:
+          $ref: '#/components/schemas/Timestamp'
+        gps:
+          $ref: '#/components/schemas/GPSPoint'
+
+    MediaPresignResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: success
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+        upload_url:
+          type: string
+          format: uri
+        upload_method:
+          type: string
+          enum: [PUT]
+        upload_headers:
+          type: object
+          additionalProperties:
+            type: string
+        storage_path:
+          type: string
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        request_id:
+          type: string
+      required:
+        - status
+        - media_asset_id
+        - upload_url
+        - upload_method
+        - storage_path
+        - expires_at
+
+    MediaFinalizePayload:
+      type: object
+      additionalProperties: false
+      required: [media_asset_id]
+      properties:
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+        checksum_sha256:
+          type: string
+          minLength: 32
+          maxLength: 128
+
+    MediaFinalizeResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: success
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+        photo_event_id:
+          $ref: '#/components/schemas/UUID'
+        request_id:
+          type: string
+      required: [status, media_asset_id, photo_event_id]
+
+    MediaStampPayload:
+      type: object
+      additionalProperties: false
+      required: [media_asset_id]
+      properties:
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+
+    MediaStampResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: accepted
+        media_asset_id:
+          $ref: '#/components/schemas/UUID'
+        worker_job_id:
+          $ref: '#/components/schemas/UUID'
+        request_id:
+          type: string
+      required: [status, media_asset_id, request_id]
+
+    ReportCompilePayload:
+      type: object
+      additionalProperties: false
+      required: [job_id, report_kind]
+      properties:
+        job_id:
+          $ref: '#/components/schemas/UUID'
+        report_kind:
+          type: string
+          enum: [daily_shift_report_pdf, job_report_pdf, client_report_pdf, timesheet_pdf]
+        report_date:
+          $ref: '#/components/schemas/Date'
+        date_from:
+          $ref: '#/components/schemas/Date'
+        date_to:
+          $ref: '#/components/schemas/Date'
+        include_client_visible_notes_only:
+          type: boolean
+          default: false
+
+    ReportCompileResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: accepted
+        export_artifact_id:
+          $ref: '#/components/schemas/UUID'
+        worker_job_id:
+          $ref: '#/components/schemas/UUID'
+        request_id:
+          type: string
+      required: [status, export_artifact_id, request_id]
+
+  responses:
+    BadRequest:
+      description: Validation or request-shape error.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Missing or invalid JWT.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Authenticated, but not authorized for this company or resource.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Conflict:
+      description: Request conflicts with current system state or duplicate processing rule.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/XRateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/XRateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/XRateLimitReset'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    InternalError:
+      description: Unexpected server-side failure.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+paths:
+  /sync/events:
+    post:
+      tags: [Sync]
+      summary: Reconcile an offline clock event batch
+      description: >
+        Accepts worker-captured clock events from the offline mobile queue.
+        The server validates assignment and geofence access, deduplicates by event UUID and idempotency semantics,
+        writes accepted rows into immutable event tables, and returns accepted, duplicate,
+        and rejected IDs.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncBatchPayload'
+      responses:
+        '200':
+          description: Batch processed successfully.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /jobs/active:
+    get:
+      tags: [Jobs]
+      summary: Pull active job context for the authenticated worker
+      description: >
+        Returns active assignments, geofence info, and task lists required for the mobile app
+        to operate with partial offline enforcement and fast local context refresh.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+      responses:
+        '200':
+          description: Active job context returned.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActiveJobContext'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ot/request:
+    post:
+      tags: [Overtime]
+      summary: Submit an overtime request
+      description: >
+        Creates an OT request linked to a previously uploaded photo event.
+        Authorization, job assignment, and request-photo ownership must be validated server-side.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTRequestPayload'
+      responses:
+        '201':
+          description: OT request created.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTRequestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ot/approve:
+    post:
+      tags: [Overtime]
+      summary: Resolve an overtime request
+      description: >
+        Appends an immutable OT approval decision to the event store.
+        Only authorized supervisor/admin roles may perform this action.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OTApprovalPayload'
+      responses:
+        '201':
+          description: OT resolution appended.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessAck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /media/presign:
+    post:
+      tags: [Media]
+      summary: Create a media asset and return a direct-upload URL
+      description: >
+        Creates a pending media_asset row and returns a signed upload URL for direct object storage upload.
+        This keeps large binary uploads off the orchestration function path.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MediaPresignPayload'
+      responses:
+        '201':
+          description: Presigned upload created.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaPresignResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /media/finalize:
+    post:
+      tags: [Media]
+      summary: Finalize a direct-uploaded media object
+      description: >
+        Confirms that the client completed storage upload, attaches optional checksum metadata,
+        marks the asset uploaded, and appends a photo event so the supervisor timeline can display it.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MediaFinalizePayload'
+      responses:
+        '200':
+          description: Media asset finalized for processing.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaFinalizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /media/stamp:
+    post:
+      tags: [Media, Internal]
+      summary: Dispatch image stamping workflow
+      description: >
+        Triggers asynchronous image-processing workflow after a raw photo is uploaded and finalized.
+        The worker downloads the raw asset, computes/validates proof metadata, creates the stamped derivative,
+        and updates media references.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MediaStampPayload'
+      responses:
+        '202':
+          description: Stamping workflow accepted into queue.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaStampResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /reports/compile:
+    post:
+      tags: [Reports, Internal]
+      summary: Trigger report compilation
+      description: >
+        Signals asynchronous report rendering to aggregate timeline data, canonical stamped media,
+        and structured summaries into a PDF or export artifact.
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - $ref: '#/components/parameters/XClientVersion'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportCompilePayload'
+      responses:
+        '202':
+          description: Report compilation queued.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportCompileResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'

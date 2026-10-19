@@ -1,0 +1,58 @@
+{
+  "@@locale": "en",
+  "appTitle": "FieldOps AI",
+  "signIn": "Sign in to worker app",
+  "signOut": "Sign out",
+  "email": "Email",
+  "password": "Password",
+  "emailRequired": "Email is required.",
+  "emailInvalid": "Enter a valid email address.",
+  "passwordRequired": "Password is required.",
+  "signInFailed": "Sign-in failed. Check your credentials and connection, then try again.",
+  "assignedJobs": "Assigned jobs",
+  "noJobsYet": "No assigned jobs yet",
+  "pullToRefresh": "Pull to refresh after a supervisor assigns work.",
+  "clockIn": "Clock in",
+  "clockOut": "Clock out",
+  "clockedIn": "Clocked in",
+  "readyToClockIn": "Ready to clock in",
+  "startBreak": "Start Break",
+  "endBreak": "End Break",
+  "onBreak": "On break",
+  "requestOT": "Request OT",
+  "takePhoto": "Photo",
+  "tasks": "{count} tasks",
+  "@tasks": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "taskChecklist": "Task checklist",
+  "proofPhoto": "Proof photo",
+  "beforePhoto": "BEFORE photo",
+  "afterPhoto": "AFTER photo",
+  "capturing": "Capturing...",
+  "uploading": "Uploading proof photo...",
+  "finalizing": "Finalizing...",
+  "photoUploaded": "Photo uploaded successfully",
+  "retry": "Retry",
+  "cancel": "Cancel",
+  "offline": "Offline",
+  "eventsQueued": "{count, plural, =1{1 event queued} other{{count} events queued}}",
+  "@eventsQueued": {
+    "placeholders": {
+      "count": {"type": "int"}
+    }
+  },
+  "submitOTRequest": "Submit OT Request",
+  "overtimeAlert": "You are entering overtime",
+  "hoursWorked": "Hours worked so far",
+  "reasonForOvertime": "Reason for overtime",
+  "mySchedule": "My schedule",
+  "upcomingShifts": "Upcoming shifts",
+  "scheduleHelp": "Published shifts for the next two weeks. Pull to refresh if a supervisor updates your schedule.",
+  "updated": "Updated",
+  "noScheduledShiftsYet": "No scheduled shifts yet",
+  "scheduleWillAppear": "Published shifts will appear here when your supervisor sends the schedule.",
+  "scheduleUnavailable": "Schedule unavailable"
+}

@@ -1,0 +1,28 @@
+# Gitleaks configuration — allowlists for known-safe secrets
+#
+# The JWTs below are Supabase's publicly documented local dev tokens.
+# They are hardcoded into every `supabase init` project and have no
+# access to any remote resources.  See:
+# https://supabase.com/docs/guides/getting-started/local-development
+
+[extend]
+# Start from the default Gitleaks ruleset
+useDefault = true
+
+[allowlist]
+description = "Supabase local dev keys and test files"
+paths = [
+  '''execution/test_sprint_1\.py''',
+  '''execution/seed_backend_test_data\.py''',
+  '''execution/test_schedule_flow\.py''',
+  '''execution/test_rls_validation\.py''',
+  '''\.github/workflows/backend-regression\.yml''',
+]
+regexes = [
+  # Supabase local dev anon key (well-known, published in Supabase docs)
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24i''',
+  # Supabase local dev service_role key (well-known, published in Supabase docs)
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSI''',
+  # MapTiler public demo key — free-tier key used as fallback, safe to commit
+  '''3EVTjBsPJIuw0UVfaNvL''',
+]
