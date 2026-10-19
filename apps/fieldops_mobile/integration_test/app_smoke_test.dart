@@ -7,7 +7,7 @@ void main() {
 
   testWidgets('launches and requires explicit Supabase configuration', (tester) async {
     await app.main();
-    await tester.pumpAndSettle(timeout: const Duration(seconds: 10));
+    await tester.pumpAndSettle();
 
     expect(find.text('Mobile app needs Supabase config'), findsOneWidget);
     expect(find.textContaining('Emulador Android:'), findsOneWidget);

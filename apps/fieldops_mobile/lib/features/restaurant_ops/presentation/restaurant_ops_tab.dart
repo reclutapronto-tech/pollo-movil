@@ -1,4 +1,5 @@
 import 'package:fieldops_mobile/features/restaurant_ops/data/restaurant_ops_repository.dart';
+import 'package:fieldops_mobile/core/data/local_database.dart';
 import 'package:fieldops_mobile/features/restaurant_ops/presentation/restaurant_calendar_screen.dart';
 import 'package:fieldops_mobile/features/restaurant_ops/presentation/restaurant_evidence_capture_screen.dart';
 import 'package:fieldops_mobile/features/restaurant_ops/presentation/restaurant_notifications_screen.dart';
@@ -518,7 +519,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     final pendingEvents = ref
         .watch(restaurantOutboxEventsProvider(widget.branchId))
-        .maybeWhen(data: (events) => events, orElse: () => const []);
+        .maybeWhen(data: (events) => events, orElse: () => const <PendingEvent>[]);
     final taskDisplayData = userId == null
         ? widget.data
         : projectPendingRestaurantTaskActions(
@@ -695,7 +696,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
         .where(
           (shift) =>
               shift['employee_id'] == userId &&
-              ((shift['shift_date'] as String? ?? '') >= localDate ||
+              ((shift['shift_date'] as String? ?? '').compareTo(localDate) >= 0 ||
                   shift['currently_active'] == true),
         )
         .toList();
@@ -1322,7 +1323,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
                 ].join(' · '),
               ),
               if (template['inspection_due'] == true)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.only(top: 4),
                   child: Text(l10n.restaurantOpsInspectionDue),
                 ),
@@ -1453,7 +1454,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
                 labelText: l10n.restaurantOpsIncidentAreaOptional,
               ),
               items: [
-                const DropdownMenuItem<String?>(
+                DropdownMenuItem<String?>(
                   value: null,
                   child: Text(l10n.restaurantOpsIncidentNoArea),
                 ),
@@ -1684,7 +1685,7 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
                 labelText: l10n.restaurantOpsHandoffRecipient,
               ),
               items: [
-                const DropdownMenuItem(
+                DropdownMenuItem(
                   value: '',
                   child: Text(l10n.restaurantOpsHandoffNoRecipient),
                 ),

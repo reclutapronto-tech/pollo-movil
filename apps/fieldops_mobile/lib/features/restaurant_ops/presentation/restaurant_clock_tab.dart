@@ -366,7 +366,7 @@ class _RestaurantClockTabState extends ConsumerState<RestaurantClockTab> {
                         ),
                       ),
                       if (_pendingClockBranches.contains(widget.branchId))
-                        const Padding(
+                        Padding(
                           padding: EdgeInsets.only(top: 10),
                           child: Text(l10n.restaurantClockPendingSync),
                         ),

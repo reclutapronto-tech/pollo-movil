@@ -823,7 +823,7 @@ class _RestaurantCalendarScreenState
                                               child: DropdownButtonFormField<String?>(
                                                 isExpanded: true,
                                                 value: assignedTo,
-                                                decoration: const InputDecoration(
+                                                decoration: InputDecoration(
                                                   labelText: l10n
                                                       .restaurantCalendarAssignee,
                                                   isDense: true,

@@ -1,4 +1,5 @@
 import 'package:fieldops_mobile/features/restaurant_ops/data/restaurant_ops_repository.dart';
+import 'package:fieldops_mobile/core/data/local_database.dart';
 import 'package:fieldops_mobile/l10n/app_localizations.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,7 +32,7 @@ class RestaurantNotificationsScreen extends ConsumerWidget {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     final pendingEvents = ref
         .watch(restaurantOutboxEventsProvider(branchId))
-        .maybeWhen(data: (events) => events, orElse: () => const []);
+        .maybeWhen(data: (events) => events, orElse: () => const <PendingEvent>[]);
     final displayedInbox = userId == null
         ? inbox
         : inbox.whenData(

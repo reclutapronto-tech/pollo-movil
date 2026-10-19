@@ -1,4 +1,5 @@
 import 'package:fieldops_mobile/features/restaurant_ops/data/restaurant_ops_repository.dart';
+import 'package:fieldops_mobile/core/data/local_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -131,7 +132,7 @@ class _RestaurantShiftCoverageScreenState
     );
     final events = ref
         .watch(restaurantOutboxEventsProvider(widget.branchId))
-        .maybeWhen(data: (rows) => rows, orElse: () => const []);
+        .maybeWhen(data: (rows) => rows, orElse: () => const <PendingEvent>[]);
 
     return Scaffold(
       appBar: AppBar(title: Text(_copy(context, 'Cobertura de turnos', 'Shift coverage', 'Remplacement de service', 'การหาคนแทนกะ', '班次代班'))),

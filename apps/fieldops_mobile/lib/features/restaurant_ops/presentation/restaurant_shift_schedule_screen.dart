@@ -508,15 +508,15 @@ class _ShiftEditorDialogState extends State<_ShiftEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
-    final weekStart = _ShiftScheduleScreenState._monday(widget.date);
+    final weekStart = _RestaurantShiftScheduleScreenState._monday(widget.date);
     final weekDates = List.generate(
       7,
       (index) => weekStart.add(Duration(days: index)),
     );
     final validDate = weekDates.any(
       (day) =>
-          _ShiftScheduleScreenState._iso(day) ==
-          _ShiftScheduleScreenState._iso(_date),
+          _RestaurantShiftScheduleScreenState._iso(day) ==
+          _RestaurantShiftScheduleScreenState._iso(_date),
     );
     if (!validDate) _date = widget.date;
     final canSave =
@@ -556,12 +556,12 @@ class _ShiftEditorDialogState extends State<_ShiftEditorDialog> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
-              value: _ShiftScheduleScreenState._iso(_date),
+              value: _RestaurantShiftScheduleScreenState._iso(_date),
               decoration: InputDecoration(labelText: l10n.restaurantShiftDay),
               items: weekDates
                   .map(
                     (day) => DropdownMenuItem(
-                      value: _ShiftScheduleScreenState._iso(day),
+                      value: _RestaurantShiftScheduleScreenState._iso(day),
                       child: Text(
                         MaterialLocalizations.of(context).formatMediumDate(day),
                       ),
