@@ -42,12 +42,13 @@ class ConfigurationRequiredScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'Run the app with dart-defines so login can talk to the local backend.',
+                        'Usa el lanzador local para conectar Android con Supabase. En un teléfono por USB, configura ADB reverse; '
+                        'las conexiones HTTP solo se permiten a los destinos locales de desarrollo.',
                         style: textTheme.bodyLarge,
                       ),
                       const SizedBox(height: 20),
                       Semantics(
-                        label: 'Terminal command to configure the app',
+                        label: 'Comandos para conectar la app a Supabase local',
                         child: Container(
                           width: double.infinity,
                           padding: const EdgeInsets.all(16),
@@ -56,9 +57,13 @@ class ConfigurationRequiredScreen extends StatelessWidget {
                             borderRadius: BorderRadius.circular(20),
                           ),
                           child: SelectableText(
-                            'flutter run \\\n'
-                            '  --dart-define=SUPABASE_URL=http://127.0.0.1:54321 \\\n'
-                            '  --dart-define=SUPABASE_ANON_KEY=<anon-key>',
+                            'Emulador Android:\n'
+                            '.\\scripts\\run-pollo-movil-local.ps1 -App android\n\n'
+                            'Teléfono Android por USB:\n'
+                            '.\\scripts\\run-pollo-movil-local.ps1 -App android -MobileSupabaseUrl http://localhost:54321\n\n'
+                            'iOS Simulator (macOS):\n'
+                            'flutter run --dart-define=SUPABASE_URL=http://127.0.0.1:54321\n'
+                            '  --dart-define=SUPABASE_ANON_KEY=<clave-publica-local>',
                             style: textTheme.bodyMedium?.copyWith(
                               color: Colors.white,
                               fontFamily: 'monospace',

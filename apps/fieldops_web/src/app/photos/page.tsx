@@ -721,7 +721,7 @@ function PhotoFeedContent() {
     try {
       const selected = filteredPhotos.filter((p) => selectedPhotos.has(p.id));
       const manifest = {
-        export_type: "FieldOps Proof Pack",
+        export_type: "Pollo Móvil · Evidencias operativas",
         exported_at: new Date().toISOString(),
         job_id: jobId,
         job_name: jobName,

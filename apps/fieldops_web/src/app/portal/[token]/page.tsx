@@ -224,7 +224,7 @@ export default function ClientPortalPage() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-500">
-          Powered by FieldOps AI — tamper-evident field documentation
+          Pollo Móvil — registro operativo de sucursal
         </p>
       </div>
 

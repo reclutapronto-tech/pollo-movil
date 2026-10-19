@@ -5,6 +5,7 @@ import { getSupabase } from "@/lib/supabase";
 import { signIn } from "@/lib/auth";
 import type { Session } from "@supabase/supabase-js";
 import { useI18n } from "@/lib/i18n";
+import { usePathname, useRouter } from "next/navigation";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -16,6 +17,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [resetSent, setResetSent] = useState(false);
   const [sendingReset, setSendingReset] = useState(false);
   const { t } = useI18n();
+  const pathname = usePathname();
+  const router = useRouter();
+  const isPasswordResetRoute = pathname === "/reset-password";
+  const isPolloRoute = pathname === "/restaurant" || pathname.startsWith("/restaurant/") || isPasswordResetRoute;
 
   useEffect(() => {
     let mounted = true;
@@ -42,6 +47,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       listener.subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    if (session && !isPolloRoute) router.replace("/restaurant");
+  }, [isPolloRoute, router, session]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -86,7 +95,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session) {
+  if (!session && !isPasswordResetRoute) {
     return (
       <div className="mx-auto mt-20 max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-card p-8 shadow-sm">
@@ -163,6 +172,14 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
             </div>
           </form>
         </div>
+      </div>
+    );
+  }
+
+  if (!isPolloRoute) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">
+        Abriendo Pollo Móvil…
       </div>
     );
   }

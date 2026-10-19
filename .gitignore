@@ -10,6 +10,8 @@ apps/fieldops_mobile/env/*.json
 .supabase
 infra/supabase/.branches/
 infra/supabase/.temp/
+infra/supabase/functions/.env
+/apps/fieldops_mobile/.env.firebase
 
 # Dependencies
 node_modules
@@ -35,3 +37,14 @@ FieldOps_AI_Complete_Plan_2026_v5.docx
 OldAgentoberemoved.md
 .gstack/
 apps/fieldops_mobile/run.sh
+
+# Generated build and test artifacts
+**/.next/
+**/.dart_tool/
+**/build/
+**/coverage/
+**/playwright-report/
+**/test-results/
+**/Pods/
+**/target/
+*.log

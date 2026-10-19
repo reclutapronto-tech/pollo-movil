@@ -19,6 +19,6 @@ base class FieldOpsProviderObserver extends ProviderObserver {
         scope.setTag('provider', providerName);
       },
     );
-    debugPrint('[FieldOps] Provider $providerName failed: $error\n$stackTrace');
+    debugPrint('[Pollo Móvil] Provider $providerName failed: $error\n$stackTrace');
   }
 }

@@ -16,9 +16,8 @@ import {
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { NAV_ITEMS, NAV_SECTIONS } from "@/lib/nav-items";
-import { AlertBell } from "@/components/alert-bell";
 
-const STORAGE_KEY = "sidebar_collapsed";
+const STORAGE_KEY = "pollo-movil-sidebar-collapsed";
 
 /* ------------------------------------------------------------------ */
 /*  Sidebar Component                                                  */
@@ -154,7 +153,7 @@ export function Sidebar() {
         <div className="flex items-center justify-between px-3 py-4">
           <div className="flex items-center gap-3 overflow-hidden">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-sm font-bold tracking-tight text-white shadow-sm dark:bg-slate-100 dark:text-slate-900">
-              F
+              P
             </div>
             {isExpanded && (
               <div className="min-w-0">
@@ -167,10 +166,9 @@ export function Sidebar() {
               </div>
             )}
           </div>
-          {/* Desktop: alert bell + collapse toggle */}
+          {/* Desktop: collapse toggle */}
           {!isMobile && (
             <div className="flex items-center gap-1">
-              {isExpanded && <AlertBell compact />}
               <button
                 onClick={toggleCollapsed}
                 aria-label={collapsed ? t("shell.expandSidebar") : t("shell.collapseSidebar")}
@@ -180,10 +178,9 @@ export function Sidebar() {
               </button>
             </div>
           )}
-          {/* Mobile: alert bell + close */}
+          {/* Mobile: close */}
           {isMobile && (
             <div className="flex items-center gap-1">
-              <AlertBell compact />
               <button
                 onClick={() => setMobileOpen(false)}
                 aria-label={t("shell.closeMenu")}
