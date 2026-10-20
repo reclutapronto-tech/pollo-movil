@@ -104,12 +104,13 @@ jobs:
           target: google_apis
           arch: x86_64
           disk-size: 4G
+          emulator-boot-timeout: 300
           disable-animations: true
           script: |
             cd "$GITHUB_WORKSPACE/apps/fieldops_mobile"
             adb logcat -c
             adb install -r build/app/outputs/flutter-apk/app-debug.apk
-            flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded
+            timeout 600s flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded
 
       - name: Collect Android emulator log
         if: always()
