@@ -15,6 +15,11 @@ const functionUrl = supabaseUrl ? supabaseUrl + "/functions/v1/restaurant_ops" :
 
 assert.ok(["real", "fallback", "cleanup"].includes(phase), "Pass --phase real, fallback, or cleanup.");
 assert.ok(supabaseUrl && anonKey && serviceRoleKey, "Local Supabase environment is required.");
+const supabaseHost = new URL(supabaseUrl).hostname;
+assert.ok(
+  ["127.0.0.1", "localhost", "[::1]"].includes(supabaseHost),
+  "Restaurant operations integration must only run against local Supabase.",
+);
 
 const admin = createClient(supabaseUrl, serviceRoleKey, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -79,19 +84,9 @@ function nextUtcDate(value) {
 
 async function cleanupFixture(fixture) {
   if (!fixture) return;
-  if (fixture.branchIds?.length) {
-    must(
-      await admin.from("restaurant_branches").delete().in("id", fixture.branchIds),
-      "Delete CI restaurant branches",
-    );
-  }
-  for (const userId of fixture.authUserIds || []) {
-    const result = await admin.auth.admin.deleteUser(userId);
-    if (result.error) throw new Error("Delete CI Auth user: " + result.error.message);
-  }
-  if (fixture.companyId) {
-    must(await admin.from("companies").delete().eq("id", fixture.companyId), "Delete CI company");
-  }
+  // This workflow owns a disposable local Supabase stack that is stopped after
+  // the job. Keep its append-only restaurant events intact; deleting a branch
+  // would cascade into event tables and correctly be rejected by their triggers.
 }
 
 async function createAuthUser(fixture, companyId, label, role) {
