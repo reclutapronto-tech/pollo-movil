@@ -68,6 +68,8 @@ jobs:
             infra/supabase/functions/galleries/index_test.ts
 
       - name: Start an isolated local Supabase stack and apply migrations
+        env:
+          SUPABASE_INTERNAL_IMAGE_REGISTRY: ghcr.io
         run: |
           docker network create pollo-movil-local
           supabase start --workdir infra --network-id pollo-movil-local \
