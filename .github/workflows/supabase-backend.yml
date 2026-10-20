@@ -67,22 +67,6 @@ jobs:
             infra/supabase/functions/tags/index_test.ts \
             infra/supabase/functions/galleries/index_test.ts
 
-      - name: Require Docker Hub pull credentials
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
-            echo "::error::Set the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets to authenticate Supabase image pulls."
-            exit 1
-          fi
-
-      - name: Authenticate Docker Hub pulls
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Start an isolated local Supabase stack and apply migrations
         run: |
           docker network create pollo-movil-local
