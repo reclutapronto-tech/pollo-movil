@@ -397,7 +397,7 @@ async function realSolverAndOperations() {
         bin_id: bin.id,
         state: index === 1 ? "half" : "full",
       })),
-    });
+    }, 201);
     assert.ok(wasteInspection.inspection_id);
     const inspectionResults = must(
       await admin.from("restaurant_waste_inspection_results").select("bin_id, declared_state")
