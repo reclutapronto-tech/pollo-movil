@@ -75,7 +75,7 @@ jobs:
           supabase start --workdir infra --network-id pollo-movil-local \
             --exclude studio,imgproxy,mailpit,logflare,vector,supavisor,postgres-meta
           supabase db reset --workdir infra --local --yes --network-id pollo-movil-local
-          supabase test db --workdir infra --local
+          supabase test db --workdir infra --local --network-id pollo-movil-local
           supabase status --workdir infra --output env > "$RUNNER_TEMP/supabase.env"
           set -a
           source "$RUNNER_TEMP/supabase.env"
