@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   supabase:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
       - name: Check out source
@@ -74,7 +74,7 @@ jobs:
           docker network create pollo-movil-local
           supabase start --workdir infra --network-id pollo-movil-local \
             --exclude studio,imgproxy,mailpit,logflare,vector,supavisor,postgres-meta
-          supabase db reset --workdir infra --local --yes
+          supabase db reset --workdir infra --local --yes --network-id pollo-movil-local
           supabase test db --workdir infra --local
           supabase status --workdir infra --output env > "$RUNNER_TEMP/supabase.env"
           set -a
