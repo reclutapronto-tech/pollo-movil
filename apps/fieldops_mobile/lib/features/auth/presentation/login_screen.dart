@@ -101,6 +101,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Center(
+                          child: Image.asset(
+                            'assets/branding/pollo-movil.png',
+                            width: 176,
+                            height: 176,
+                            fit: BoxFit.contain,
+                            semanticLabel: 'Logotipo oficial de El Pollo Móvil',
+                          ),
+                        ),
+                        const SizedBox(height: 20),
                         Wrap(
                           spacing: 10,
                           runSpacing: 10,

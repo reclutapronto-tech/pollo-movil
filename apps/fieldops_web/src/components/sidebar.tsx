@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "@/lib/theme";
 import { NAV_ITEMS, NAV_SECTIONS } from "@/lib/nav-items";
+import { BrandLogo } from "@/components/brand-logo";
 
 const STORAGE_KEY = "pollo-movil-sidebar-collapsed";
 
@@ -152,9 +153,12 @@ export function Sidebar() {
         {/* Brand + Toggle */}
         <div className="flex items-center justify-between px-3 py-4">
           <div className="flex items-center gap-3 overflow-hidden">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-sm font-bold tracking-tight text-white shadow-sm dark:bg-slate-100 dark:text-slate-900">
-              P
-            </div>
+            <BrandLogo
+              width={48}
+              height={48}
+              alt=""
+              className="h-10 w-10 shrink-0 object-contain"
+            />
             {isExpanded && (
               <div className="min-w-0">
                 <div className="truncate text-sm font-bold tracking-tight text-slate-900">

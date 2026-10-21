@@ -1,0 +1,26 @@
+{
+  "name": "El Pollo Móvil",
+  "short_name": "Pollo Móvil",
+  "start_url": "/restaurant",
+  "display": "standalone",
+  "background_color": "#7D1DAD",
+  "theme_color": "#7D1DAD",
+  "icons": [
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/android-chrome-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

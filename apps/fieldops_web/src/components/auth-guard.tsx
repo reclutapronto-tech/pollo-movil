@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { signIn } from "@/lib/auth";
 import type { Session } from "@supabase/supabase-js";
+import { BrandLogo } from "@/components/brand-logo";
 import { useI18n } from "@/lib/i18n";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -104,6 +105,15 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     return (
       <div className="mx-auto mt-20 max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-card p-8 shadow-sm">
+          <div className="mb-5 flex justify-center">
+            <BrandLogo
+              width={192}
+              height={192}
+              alt="Logotipo oficial de El Pollo Móvil"
+              priority
+              className="h-40 w-40 object-contain"
+            />
+          </div>
           <h2 className="text-xl font-bold text-slate-900">
             {t("auth.title")}
           </h2>
