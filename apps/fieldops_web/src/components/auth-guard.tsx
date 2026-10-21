@@ -10,6 +10,8 @@ import { usePathname, useRouter } from "next/navigation";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  const [roleLoading, setRoleLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
@@ -22,9 +24,11 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const isPasswordResetRoute = pathname === "/reset-password";
   const isPublicGalleryRoute = pathname.startsWith("/g/");
+  const isPlatformRoute = pathname === "/platform" || pathname.startsWith("/platform/");
   const isPolloRoute =
     pathname === "/restaurant" ||
     pathname.startsWith("/restaurant/") ||
+    isPlatformRoute ||
     isPasswordResetRoute ||
     isPublicGalleryRoute;
 
@@ -55,8 +59,26 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (session && !isPolloRoute) router.replace("/restaurant");
-  }, [isPolloRoute, router, session]);
+    let active = true;
+    async function resolveAccess() {
+      if (!session || isPasswordResetRoute || isPublicGalleryRoute) {
+        setPlatformAdmin(false);
+        setRoleLoading(false);
+        return;
+      }
+      setRoleLoading(true);
+      const { data, error } = await getSupabase().rpc("is_platform_admin");
+      if (!active) return;
+      const isAdmin = !error && data === true;
+      setPlatformAdmin(isAdmin);
+      setRoleLoading(false);
+      if (isAdmin && !isPlatformRoute) router.replace("/platform");
+      if (!isAdmin && isPlatformRoute) router.replace("/restaurant");
+      else if (!isAdmin && !isPolloRoute) router.replace("/restaurant");
+    }
+    void resolveAccess();
+    return () => { active = false; };
+  }, [isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -92,7 +114,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     }
   }
 
-  if (loading) {
+  if (loading || (session && roleLoading)) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center text-slate-500">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-amber-500" />
@@ -197,6 +219,10 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         Abriendo Pollo Móvil…
       </div>
     );
+  }
+
+  if (isPlatformRoute && !platformAdmin) {
+    return <div className="p-8 text-sm text-slate-500">Validando acceso administrativo…</div>;
   }
 
   return <>{children}</>;

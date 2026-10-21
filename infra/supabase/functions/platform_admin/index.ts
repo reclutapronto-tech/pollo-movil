@@ -113,7 +113,7 @@ serve(async (req) => {
         .eq("is_active", true)
         .single()
 
-      if (!adminRecord) {
+      if (!adminRecord || !["platform_admin", "platform_superadmin"].includes(adminRecord.role)) {
         return errorResponse(requestId, 403, "FORBIDDEN", "Not a platform administrator")
       }
 
@@ -126,6 +126,19 @@ serve(async (req) => {
     if (req.method === "GET") {
       const url = new URL(req.url)
       const action = url.searchParams.get("action")
+
+      if (action === "platform_overview") {
+        const [{ data: terms, error: termsError }, { data: companies, error: companiesError },
+          { data: licenses, error: licensesError }] = await Promise.all([
+          supabaseAdmin.from("platform_license_terms").select("*").eq("singleton", true).single(),
+          supabaseAdmin.from("company_summary").select("*").order("created_at", { ascending: false }).limit(100),
+          supabaseAdmin.from("platform_company_licenses").select("*").order("updated_at", { ascending: false }),
+        ])
+        if (termsError) throw termsError
+        if (companiesError) throw companiesError
+        if (licensesError) throw licensesError
+        return jsonResponse({ status: "success", terms, companies: companies || [], licenses: licenses || [], request_id: requestId }, 200, requestId)
+      }
 
       // ── list_companies ─────────────────────────────────────
       if (action === "list_companies") {
@@ -331,6 +344,59 @@ serve(async (req) => {
 
       if (!action) {
         return errorResponse(requestId, 400, "INVALID_PAYLOAD", "action is required in POST body")
+      }
+
+      if (action === "update_license_terms") {
+        if (payload.commercially_authorized !== true) {
+          return errorResponse(requestId, 400, "COMMERCIAL_AUTHORIZATION_REQUIRED", "Explicit commercial authorization is required")
+        }
+        const reference = typeof payload.authorization_reference === "string" ? payload.authorization_reference.trim() : ""
+        const integer = (value: unknown) => Number.isSafeInteger(value)
+        if (!reference || !integer(payload.package_branch_count) || !integer(payload.monthly_price_per_branch_cents)
+          || !integer(payload.additional_branch_monthly_price_cents) || !integer(payload.maximum_additional_branches)
+          || typeof payload.annual_custom_pricing_enabled !== "boolean" || typeof payload.currency !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Provide valid terms and an authorization reference")
+        }
+        const { data, error } = await supabaseAdmin.rpc("platform_update_license_terms", {
+          p_actor_id: user!.id,
+          p_package_branch_count: payload.package_branch_count,
+          p_monthly_price_per_branch_cents: payload.monthly_price_per_branch_cents,
+          p_additional_branch_monthly_price_cents: payload.additional_branch_monthly_price_cents,
+          p_maximum_additional_branches: payload.maximum_additional_branches,
+          p_annual_custom_pricing_enabled: payload.annual_custom_pricing_enabled,
+          p_currency: payload.currency,
+          p_authorization_reference: reference,
+        })
+        if (error) throw error
+        await logPlatformAction(supabaseAdmin, req, { actor_id: user!.id, action, target_type: "license_terms", after: data })
+        return jsonResponse({ status: "success", terms: data, request_id: requestId }, 200, requestId)
+      }
+
+      if (action === "set_company_license") {
+        if (payload.commercially_authorized !== true) {
+          return errorResponse(requestId, 400, "COMMERCIAL_AUTHORIZATION_REQUIRED", "Explicit commercial authorization is required")
+        }
+        const reference = typeof payload.contract_reference === "string" ? payload.contract_reference.trim() : ""
+        if (!reference || typeof payload.company_id !== "string" || !Number.isSafeInteger(payload.package_count)
+          || !Number.isSafeInteger(payload.additional_branch_count)) {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Provide company, package quantities and contract reference")
+        }
+        const annualOverride = payload.annual_price_override_cents ?? null
+        if (annualOverride !== null && !Number.isSafeInteger(annualOverride)) {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "annual_price_override_cents must be an integer")
+        }
+        const { data, error } = await supabaseAdmin.rpc("platform_set_company_branch_license", {
+          p_actor_id: user!.id,
+          p_company_id: payload.company_id,
+          p_package_count: payload.package_count,
+          p_additional_branch_count: payload.additional_branch_count,
+          p_contract_reference: reference,
+          p_annual_price_override_cents: annualOverride,
+          p_annual_approval_reference: payload.annual_approval_reference ?? null,
+        })
+        if (error) throw error
+        await logPlatformAction(supabaseAdmin, req, { actor_id: user!.id, action, company_id: payload.company_id, target_type: "branch_license", target_id: payload.company_id, after: data })
+        return jsonResponse({ status: "success", license: data, request_id: requestId }, 200, requestId)
       }
 
       // ── create_company ─────────────────────────────────────
@@ -742,7 +808,7 @@ serve(async (req) => {
             auth_user_id: authUser.user.id,
             full_name,
             email,
-            role: "platform_admin",
+            role: "platform_superadmin",
             is_active: true,
           })
 
