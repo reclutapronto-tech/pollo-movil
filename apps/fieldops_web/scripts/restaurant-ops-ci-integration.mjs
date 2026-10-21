@@ -117,6 +117,63 @@ async function createAuthUser(fixture, companyId, label, role) {
   return { id: result.data.user.id, email, password };
 }
 
+async function createPlatformSuperadmin(fixture) {
+  const id = randomUUID();
+  const email = "pollo-ci-platform-" + id + "@example.com";
+  const password = "ci-" + randomUUID() + "-Aa9!";
+  const result = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { full_name: "CI Temporary Platform Superadmin" },
+  });
+  if (result.error || !result.data.user) {
+    throw new Error("Create temporary CI platform superadmin: " + (result.error?.message || "no user returned"));
+  }
+  fixture.authUserIds.push(result.data.user.id);
+  must(
+    await admin.from("platform_admins").insert({
+      auth_user_id: result.data.user.id,
+      email,
+      full_name: "CI Temporary Platform Superadmin",
+      role: "platform_superadmin",
+      is_active: true,
+    }),
+    "Register temporary CI platform superadmin",
+  );
+  return result.data.user.id;
+}
+
+async function authorizeCiBranchPackage(actorId, companyId) {
+  must(
+    await admin.rpc("platform_set_company_branch_license", {
+      p_actor_id: actorId,
+      p_company_id: companyId,
+      p_package_count: 1,
+      p_additional_branch_count: 0,
+      p_contract_reference: "CI: isolated five-branch package " + randomUUID(),
+      p_annual_price_override_cents: null,
+      p_annual_approval_reference: null,
+    }),
+    "Authorize isolated CI five-branch package through platform RPC",
+  );
+}
+
+async function expectBranchActivationDenied(companyId, managerId, name, expectedError) {
+  const result = await admin.from("restaurant_branches").insert({
+    company_id: companyId,
+    name,
+    timezone: "UTC",
+    created_by: managerId,
+  }).select("id").single();
+  assert.ok(result.error, "Branch activation must be rejected: " + expectedError);
+  assert.equal(result.error.code, "23514");
+  assert.ok(
+    result.error.message.includes(expectedError),
+    "Expected " + expectedError + " but received: " + result.error.message,
+  );
+}
+
 async function realSolverAndOperations() {
   const fixture = { authUserIds: [], branchIds: [] };
   let saved = false;
@@ -130,6 +187,9 @@ async function realSolverAndOperations() {
       "Create isolated CI company",
     );
     fixture.companyId = company.id;
+    const platformSuperadminId = await createPlatformSuperadmin(fixture);
+    await authorizeCiBranchPackage(platformSuperadminId, company.id);
+
     const manager = await createAuthUser(fixture, company.id, "Supervisor", "supervisor");
     const cookA = await createAuthUser(fixture, company.id, "Cook A", "worker");
     const cookB = await createAuthUser(fixture, company.id, "Cook B", "worker");
@@ -137,6 +197,22 @@ async function realSolverAndOperations() {
     const absentCook = await createAuthUser(fixture, company.id, "Absent Cook", "worker");
     fixture.manager = { email: manager.email, password: manager.password };
     fixture.workerIds = [cookA.id, cookB.id, cashier.id, absentCook.id];
+
+    const unlicensedCompany = must(
+      await admin.from("companies").insert({
+        name: "Pollo Móvil CI Unlicensed " + randomUUID().slice(0, 8),
+        slug: "pollo-movil-ci-unlicensed-" + randomUUID(),
+        timezone: "UTC",
+      }).select("id").single(),
+      "Create isolated unlicensed CI company",
+    );
+    const unlicensedManager = await createAuthUser(fixture, unlicensedCompany.id, "Unlicensed Supervisor", "supervisor");
+    await expectBranchActivationDenied(
+      unlicensedCompany.id,
+      unlicensedManager.id,
+      "CI must reject branch without license " + randomUUID().slice(0, 8),
+      "BRANCH_LICENSE_REQUIRED",
+    );
 
     const managerAuth = await authenticate(manager.email, manager.password);
     const workerAAuth = await authenticate(cookA.email, cookA.password);
@@ -162,6 +238,28 @@ async function realSolverAndOperations() {
       "Create branch for row-isolation check",
     );
     fixture.branchIds.push(otherBranch.id);
+
+    // Fill the authorized five-branch package, then prove the sixth activation
+    // is rejected by the production capacity trigger rather than bypassed.
+    for (let index = 0; index < 3; index += 1) {
+      const capacityBranch = must(
+        await admin.from("restaurant_branches").insert({
+          company_id: company.id,
+          name: "CI Capacity " + (index + 1) + " " + randomUUID().slice(0, 8),
+          timezone: "UTC",
+          created_by: manager.id,
+        }).select("id").single(),
+        "Fill isolated CI package capacity",
+      );
+      fixture.branchIds.push(capacityBranch.id);
+    }
+    await expectBranchActivationDenied(
+      company.id,
+      manager.id,
+      "CI must reject branch above package capacity " + randomUUID().slice(0, 8),
+      "BRANCH_LICENSE_CAPACITY_EXCEEDED",
+    );
+
     assert.equal(branch.enable_time_clock, false, "Attendance must default to disabled.");
     assert.equal(branch.require_gps_for_time_clock, false, "GPS must default to disabled.");
 
@@ -468,6 +566,8 @@ async function realSolverAndOperations() {
     await writeFile(fixturePath, JSON.stringify(fixture), { mode: 0o600 });
     saved = true;
     console.log("PASS Auth, role denial, and branch-isolated RLS.");
+    console.log("PASS CI-only platform superadmin authorized the five-branch package through the real licensing RPC.");
+    console.log("PASS Branch activation is rejected without a license and above the licensed capacity.");
     console.log("PASS Calendar materialization and rescheduling.");
     console.log("PASS Timefold authenticated optimization, eligibility, fairness, and PostgreSQL persistence.");
     console.log("PASS Offline start/pause/resume/complete replay and event idempotency.");
