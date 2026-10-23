@@ -1,6 +1,6 @@
 # Hito 0 — Consolidación de Pollo Móvil
 
-Snapshot de solo lectura realizado el **23 de octubre de 2026**. No se publicó ni sincronizó código. Los documentos describen evidencia del checkout local, CLI/API disponibles y proyecto Supabase identificado; distinguen código presente de comportamiento operativo comprobado.
+Actualizado el **23 de octubre de 2026** tras estabilizar localmente las pruebas E2E de autenticación. No se publicó ni sincronizó código. El commit de código candidato de esta corrección es `7196eba121f8daf98a805a38612326c679e83d6e`; el commit documental separado registra los resultados. Distinguir la evidencia local de servicios remotos y de una sesión autenticada real.
 
 ## Decisión de fuente de verdad
 
@@ -10,7 +10,7 @@ Snapshot de solo lectura realizado el **23 de octubre de 2026**. No se publicó 
 
 ## Estado en una frase
 
-El checkout local `pollo-movil` en `9151800` contiene los cuatro commits que estaban únicamente en Servicios Digitales MX, dos commits locales posteriores y el código de Fase 1; los remotos todavía no los contienen. Hay una copia verificable de refs y cambios Flutter. Staging Supabase está activo, pero la migración de consola Fase 1 sigue pendiente allí; no se verificó sesión real del propietario ni despliegue Vercel Staging.
+El checkout `pollo-movil` conserva la consolidación del Hito 0 y añade un ajuste local de Playwright: usa el build de producción en un puerto dedicado para evitar que una instancia fría de Next dev o un servicio ajeno como Grafana afecten las pruebas. TypeScript, build Next y 7 de 9 E2E pasaron; dos E2E que requieren credenciales autorizadas se omitieron. ESLint sigue bloqueado por una dependencia ausente del `node_modules` local. El HEAD remoto Recluta (`21894cde`) fue consultado y es ancestro del candidato; el historial local sigue siendo fast-forward. No hubo push, despliegue ni cambios de Supabase remoto. El estado completo y los límites están en [validation-security.md](validation-security.md).
 
 ## Índice
 

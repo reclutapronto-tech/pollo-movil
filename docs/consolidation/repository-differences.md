@@ -6,7 +6,7 @@
 |---|---|---|---|
 | ReclutaPronto (`pollo-destination`) | `6c790dc` | `21894cd` | Repo principal aprobado; ambas refs remotas se consultaron directamente. |
 | Servicios Digitales MX (`pollo-github`) | `6c790dc` | `69c4240` | Espejo actual; conserva avances que faltaban en el remoto de ReclutaPronto. |
-| Checkout local | `main`=`02f8669` | `pollo-movil`=`9151800` | Rama de trabajo sigue a `pollo-destination/pollo-movil`, +6 commits; `main` local pertenece a la historia upstream de FieldOps AI, no usarla para publicar Pollo Móvil. |
+| Checkout local | `main`=`02f8669` | `pollo-movil` incluye `7196eba` y este commit documental | Rama de trabajo sigue a `pollo-destination/pollo-movil`; remoto reconsultado en `21894cde` el 2026-10-23, ancestro del candidato. Fast-forward válido. `main` local pertenece a la historia upstream de FieldOps AI, no usarla para publicar Pollo Móvil. |
 | Upstream FieldOps AI (`origin`) | `02f8669` | No usar como destino | Solo upstream de referencia. No publicar ahí. |
 
 Los identificadores completos y conteos Git fueron obtenidos localmente el 2026-10-23. Los remotos pueden avanzar después del snapshot; volver a consultar heads antes de preparar una integración.
@@ -24,8 +24,11 @@ El checkout local añade, después de `69c4240`:
 
 - `59f0bcc` — flujo de recuperación de contraseña e invitaciones; todavía requiere validación con enlace vigente y sesión real.
 - `9151800` — consola SaaS Fase 1, migración y pruebas; local-only en este snapshot.
+- `7196eba` — configura Playwright para usar el build de producción en un puerto aislado; 7 E2E pasan y 2 que necesitan credenciales autorizadas se omiten.
 
-Por tanto, ReclutaPronto remoto está 6 commits detrás del checkout local y Servicios Digitales MX está 2 commits detrás. No se detectaron commits exclusivos de los remotos objetivo que falten en el checkout local. Esto no es autorización para publicar.
+Antes del commit documental, el candidato de código `7196eba` estaba ocho commits por delante de Recluta. Este commit documental añade el noveno cambio local. Ambos commits son descendientes del HEAD remoto verificado; el remoto no se modificó.
+
+La relación anterior de seis commits era el snapshot de Hito 0. Para esta estabilización, Recluta remoto `21894cde` quedó verificado como ancestro del candidato, ocho commits antes de la documentación y nueve después. El mirror se consultó pero no se modificó ni se sincronizó. No se detectaron commits remotos objetivo nuevos que falten localmente en esta comprobación. Esto no es autorización para publicar.
 
 ## Árbol de trabajo
 
