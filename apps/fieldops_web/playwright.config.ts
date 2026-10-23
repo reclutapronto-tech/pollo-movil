@@ -1,6 +1,9 @@
 import { defineConfig } from '@playwright/test';
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:3000';
+const defaultPort = process.env.PLAYWRIGHT_PORT ?? '4318';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${defaultPort}`;
+const baseURLObject = new URL(baseURL);
+const port = process.env.PLAYWRIGHT_PORT ?? (baseURLObject.port || '3000');
 
 export default defineConfig({
   testDir: './e2e',
@@ -15,9 +18,11 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run dev',
+    // E2E runs against the production build created by the preceding build step.
+    // A dedicated port and no reuse prevent collisions with local services (e.g. Grafana).
+    command: `node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port ${port}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     timeout: 60000,
   },
 });
