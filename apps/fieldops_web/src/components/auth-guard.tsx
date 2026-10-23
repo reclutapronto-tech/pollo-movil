@@ -23,6 +23,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isPasswordResetRoute = pathname === "/reset-password";
+  const isCompanyInviteRoute = pathname === "/accept-company-invite";
   const isPublicGalleryRoute = pathname.startsWith("/g/");
   const isPlatformRoute = pathname === "/platform" || pathname.startsWith("/platform/");
   const isPolloRoute =
@@ -30,19 +31,37 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     pathname.startsWith("/restaurant/") ||
     isPlatformRoute ||
     isPasswordResetRoute ||
+    isCompanyInviteRoute ||
     isPublicGalleryRoute;
 
   useEffect(() => {
     let mounted = true;
-    const supabase = getSupabase();
 
-    supabase.auth.getSession().then(({ data, error: sessionError }) => {
-      if (!mounted) return; // component unmounted before promise resolved
-      if (sessionError) {
-        setError(sessionError.message);
-      } else {
-        setSession(data.session);
-      }
+    // The reset page owns callback processing. Avoid racing its PKCE exchange
+    // or implicit-flow fragment detection with a second getSession call.
+    if (isPasswordResetRoute || isCompanyInviteRoute) {
+      setLoading(false);
+      setSession(null);
+      return () => { mounted = false; };
+    }
+
+    let supabase: ReturnType<typeof getSupabase>;
+    try {
+      supabase = getSupabase();
+    } catch {
+      setError("El servicio de inicio de sesión no está configurado. Inténtalo más tarde.");
+      setLoading(false);
+      return () => { mounted = false; };
+    }
+
+    void supabase.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!mounted) return;
+      if (sessionError) setError("No se pudo comprobar la sesión. Vuelve a intentarlo.");
+      else setSession(data.session);
+      setLoading(false);
+    }).catch(() => {
+      if (!mounted) return;
+      setError("No se pudo conectar con el servicio de inicio de sesión.");
       setLoading(false);
     });
 
@@ -56,12 +75,12 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       mounted = false;
       listener.subscription.unsubscribe();
     };
-  }, []);
+  }, [isCompanyInviteRoute, isPasswordResetRoute]);
 
   useEffect(() => {
     let active = true;
     async function resolveAccess() {
-      if (!session || isPasswordResetRoute || isPublicGalleryRoute) {
+      if (!session || isPasswordResetRoute || isCompanyInviteRoute || isPublicGalleryRoute) {
         setPlatformAdmin(false);
         setRoleLoading(false);
         return;
@@ -78,7 +97,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     }
     void resolveAccess();
     return () => { active = false; };
-  }, [isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
+  }, [isCompanyInviteRoute, isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -123,7 +142,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session && !isPasswordResetRoute && !isPublicGalleryRoute) {
+  if (!session && !isPasswordResetRoute && !isCompanyInviteRoute && !isPublicGalleryRoute) {
     return (
       <div className="mx-auto mt-20 max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-card p-8 shadow-sm">
