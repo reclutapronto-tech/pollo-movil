@@ -252,11 +252,13 @@ class _RestaurantBranchStructureScreenState
     required bool readOnly,
   }) => _BranchFeaturesEditor(
     key: ValueKey(
-      '${features['enable_time_clock']}:${features['require_gps_for_time_clock']}',
+      '${features['enable_time_clock']}:${features['require_gps_for_time_clock']}:${features['meal_duration_minutes']}:${features['collaboration_reservation_seconds']}',
     ),
     branchId: widget.branchId,
     enableTimeClock: features['enable_time_clock'] == true,
     requireGps: features['require_gps_for_time_clock'] == true,
+    mealDurationMinutes: features['meal_duration_minutes'] as int?,
+    collaborationReservationSeconds: features['collaboration_reservation_seconds'] as int?,
     readOnly: readOnly,
   );
 
@@ -352,12 +354,16 @@ class _BranchFeaturesEditor extends ConsumerStatefulWidget {
     required this.branchId,
     required this.enableTimeClock,
     required this.requireGps,
+    required this.mealDurationMinutes,
+    required this.collaborationReservationSeconds,
     required this.readOnly,
   });
 
   final String branchId;
   final bool enableTimeClock;
   final bool requireGps;
+  final int? mealDurationMinutes;
+  final int? collaborationReservationSeconds;
   final bool readOnly;
 
   @override
@@ -366,27 +372,48 @@ class _BranchFeaturesEditor extends ConsumerStatefulWidget {
 }
 
 class _BranchFeaturesEditorState extends ConsumerState<_BranchFeaturesEditor> {
+  late final TextEditingController _mealDurationController = TextEditingController(text: _mealDuration);
   late bool _enableTimeClock = widget.enableTimeClock;
   late bool _requireGps = widget.enableTimeClock && widget.requireGps;
   late bool _savedTimeClock = _enableTimeClock;
   late bool _savedGps = _requireGps;
+  late String _mealDuration = widget.mealDurationMinutes?.toString() ?? '';
+  late String _savedMealDuration = _mealDuration;
+  late String _reservationSeconds = widget.collaborationReservationSeconds?.toString() ?? '';
+  late String _savedReservationSeconds = _reservationSeconds;
+  late final TextEditingController _reservationController = TextEditingController(text: _reservationSeconds);
   bool _saving = false;
+
+  @override
+  void dispose() {
+    _mealDurationController.dispose();
+    _reservationController.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(covariant _BranchFeaturesEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.enableTimeClock != widget.enableTimeClock ||
-        oldWidget.requireGps != widget.requireGps) {
+        oldWidget.requireGps != widget.requireGps ||
+        oldWidget.mealDurationMinutes != widget.mealDurationMinutes ||
+        oldWidget.collaborationReservationSeconds != widget.collaborationReservationSeconds) {
       _enableTimeClock = widget.enableTimeClock;
       _requireGps = widget.enableTimeClock && widget.requireGps;
       _savedTimeClock = _enableTimeClock;
       _savedGps = _requireGps;
+      _mealDuration = widget.mealDurationMinutes?.toString() ?? '';
+      _savedMealDuration = _mealDuration;
+      _mealDurationController.text = _mealDuration;
+      _reservationSeconds = widget.collaborationReservationSeconds?.toString() ?? '';
+      _savedReservationSeconds = _reservationSeconds;
+      _reservationController.text = _reservationSeconds;
     }
   }
 
   Future<void> _save() async {
     if (_saving ||
-        (_enableTimeClock == _savedTimeClock && _requireGps == _savedGps))
+        (_enableTimeClock == _savedTimeClock && _requireGps == _savedGps && _mealDuration == _savedMealDuration && _reservationSeconds == _savedReservationSeconds))
       return;
     final l10n = AppLocalizations.of(context)!;
     setState(() => _saving = true);
@@ -397,11 +424,17 @@ class _BranchFeaturesEditorState extends ConsumerState<_BranchFeaturesEditor> {
             branchId: widget.branchId,
             enableTimeClock: _enableTimeClock,
             requireGps: _requireGps,
+            mealDurationMinutes: _mealDuration.isEmpty ? null : int.tryParse(_mealDuration),
+            updateMealDuration: true,
+            collaborationReservationSeconds: _reservationSeconds.isEmpty ? null : int.tryParse(_reservationSeconds),
+            updateCollaborationReservation: true,
           );
       if (!mounted) return;
       setState(() {
         _savedTimeClock = _enableTimeClock;
         _savedGps = _requireGps;
+        _savedMealDuration = _mealDuration;
+        _savedReservationSeconds = _reservationSeconds;
         _saving = false;
       });
       ref.invalidate(restaurantBranchesProvider);
@@ -424,7 +457,11 @@ class _BranchFeaturesEditorState extends ConsumerState<_BranchFeaturesEditor> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final dirty =
-        _enableTimeClock != _savedTimeClock || _requireGps != _savedGps;
+        _enableTimeClock != _savedTimeClock || _requireGps != _savedGps || _mealDuration != _savedMealDuration || _reservationSeconds != _savedReservationSeconds;
+    final duration = int.tryParse(_mealDuration);
+    final validDuration = _mealDuration.isEmpty || (duration != null && duration >= 1 && duration <= 240);
+    final reservation = int.tryParse(_reservationSeconds);
+    final validReservation = _reservationSeconds.isEmpty || (reservation != null && reservation >= 30 && reservation <= 3600);
     return Card(
       margin: const EdgeInsets.only(bottom: 14),
       child: Padding(
@@ -438,6 +475,28 @@ class _BranchFeaturesEditorState extends ConsumerState<_BranchFeaturesEditor> {
             ),
             const SizedBox(height: 4),
             Text(l10n.restaurantAttendanceOptional),
+            const SizedBox(height: 12),
+            TextField(
+              keyboardType: TextInputType.number,
+              enabled: !_saving && !widget.readOnly,
+              decoration: const InputDecoration(
+                labelText: 'Duración de comida autorizada (minutos)',
+                helperText: 'Déjala vacía hasta definir la política de la sucursal.',
+              ),
+              controller: _mealDurationController,
+              onChanged: (value) => setState(() => _mealDuration = value),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              keyboardType: TextInputType.number,
+              enabled: !_saving && !widget.readOnly,
+              decoration: const InputDecoration(
+                labelText: 'Reserva de avisos colaborativos (segundos)',
+                helperText: 'Sin configurar, no se reserva automáticamente ningún aviso.',
+              ),
+              controller: _reservationController,
+              onChanged: (value) => setState(() => _reservationSeconds = value),
+            ),
             SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
               title: Text(l10n.restaurantAttendanceEnableClock),
@@ -462,7 +521,7 @@ class _BranchFeaturesEditorState extends ConsumerState<_BranchFeaturesEditor> {
             Align(
               alignment: Alignment.centerRight,
               child: FilledButton.icon(
-                onPressed: dirty && !_saving && !widget.readOnly ? _save : null,
+                onPressed: dirty && validDuration && validReservation && !_saving && !widget.readOnly ? _save : null,
                 icon: _saving
                     ? const SizedBox.square(
                         dimension: 16,

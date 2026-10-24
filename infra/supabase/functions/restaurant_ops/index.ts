@@ -50,6 +50,43 @@ function timeInZone(timezone: string, value: unknown): string | null {
   }).format(date)
 }
 
+function localClockToUtc(date: string, time: string, timezone: string): string {
+  const [year, month, day] = date.split("-").map(Number)
+  const [hour, minute] = time.split(":").map(Number)
+  const target = Date.UTC(year, month - 1, day, hour, minute)
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(target))
+  const values = Object.fromEntries(parts.map((part) => [part.type, Number(part.value)]))
+  const represented = Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute)
+  return new Date(target + (target - represented)).toISOString()
+}
+
+function localDateTimeToUtc(value: string, timezone: string): string | null {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(value)
+  if (!match || !isCalendarDate(match[1])) return null
+  const [hour, minute] = match[2].split(":").map(Number)
+  if (hour > 23 || minute > 59) return null
+  const utc = localClockToUtc(match[1], match[2], timezone)
+  const parsed = new Date(utc)
+  if (dateInZone(timezone, parsed) !== match[1] || timeInZone(timezone, utc) !== match[2]) return null
+  return utc
+}
+
+function declaredTimestamp(value: unknown, timezone: string): string | null {
+  if (value == null || value === "") return null
+  if (typeof value !== "string") fail(400, "INVALID_DECLARED_MEAL_TIME", "La hora declarada debe ser una fecha válida.")
+  const absoluteTimestamp = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value)
+  const parsed = absoluteTimestamp
+    ? new Date(value)
+    : new Date(localDateTimeToUtc(value, timezone) ?? Number.NaN)
+  if (!Number.isFinite(parsed.getTime()) || parsed.getTime() > Date.now() + 60_000) {
+    fail(400, "INVALID_DECLARED_MEAL_TIME", "La hora declarada debe ser válida y no futura.")
+  }
+  return parsed.toISOString()
+}
+
 function addDays(date: string, days: number): string {
   const result = new Date(`${date}T12:00:00Z`)
   result.setUTCDate(result.getUTCDate() + days)
@@ -60,6 +97,12 @@ function isCalendarDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const parsed = new Date(`${value}T00:00:00Z`)
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+}
+
+async function stableFingerprint(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value))
+  const digest = await crypto.subtle.digest("SHA-256", bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
 function assertNoError<T>(result: { data: T; error: { message: string } | null }): T {
@@ -84,13 +127,30 @@ async function memberForBranch(
   return data
 }
 
+async function ensureEmployeeAvailableForNewAssignment(
+  admin: SupabaseClient, branchId: string, employeeId: string, scheduledFor: string, localDate: string,
+) {
+  if (scheduledFor !== localDate) return
+  const [stateResult, mealResult] = await Promise.all([
+    admin.from("restaurant_member_operational_states").select("state")
+      .eq("branch_id", branchId).eq("employee_id", employeeId).maybeSingle(),
+    admin.from("restaurant_meal_sessions").select("id")
+      .eq("branch_id", branchId).eq("employee_id", employeeId).is("return_confirmed_at", null).limit(1),
+  ])
+  const state = assertNoError(stateResult)?.state
+  const activeMeal = assertNoError(mealResult) ?? []
+  if (["meal", "rest", "off_shift"].includes(String(state)) || activeMeal.length > 0) {
+    fail(409, "EMPLOYEE_OPERATIONALLY_UNAVAILABLE", "No se pueden crear asignaciones nuevas mientras la persona está en comida, descanso o fuera de turno.")
+  }
+}
+
 async function getBranches(admin: SupabaseClient, userId: string) {
   const memberships = assertNoError(await admin.from("restaurant_memberships")
     .select("branch_id, access_role").eq("user_id", userId).eq("is_active", true)) ?? []
   const ids = memberships.map((row: { branch_id: string }) => row.branch_id)
   if (ids.length === 0) return []
   const branches = assertNoError(await admin.from("restaurant_branches")
-    .select("id, company_id, name, timezone, is_active, enable_time_clock, require_gps_for_time_clock").in("id", ids).eq("is_active", true)) ?? []
+    .select("id, company_id, name, timezone, is_active, enable_time_clock, require_gps_for_time_clock, meal_duration_minutes, collaboration_reservation_seconds, collaboration_manager_escalation_seconds, minimum_area_coverage").in("id", ids).eq("is_active", true)) ?? []
   return branches.map((branch: Record<string, unknown>) => ({
     ...branch,
     access_role: memberships.find((item: { branch_id: string }) => item.branch_id === branch.id)?.access_role,
@@ -99,7 +159,7 @@ async function getBranches(admin: SupabaseClient, userId: string) {
 
 async function getSettings(admin: SupabaseClient, branchId: string, companyId: string, requestedShiftStart?: string | null) {
   const branch = assertNoError(await admin.from("restaurant_branches")
-    .select("id, name, timezone, company_id, enable_time_clock, require_gps_for_time_clock, assignment_load_balance_weight, assignment_heavy_rotation_weight, assignment_priority_weight").eq("id", branchId).single())
+    .select("id, name, timezone, company_id, enable_time_clock, require_gps_for_time_clock, meal_duration_minutes, collaboration_reservation_seconds, receipt_escalation_seconds_by_priority, collaboration_manager_escalation_seconds, minimum_area_coverage, assignment_load_balance_weight, assignment_heavy_rotation_weight, assignment_priority_weight").eq("id", branchId).single())
   const localDate = dateInZone(branch.timezone)
   const requestedDate = requestedShiftStart && /^\d{4}-\d{2}-\d{2}$/.test(requestedShiftStart)
     ? new Date(`${requestedShiftStart}T00:00:00.000Z`) : null
@@ -108,7 +168,7 @@ async function getSettings(admin: SupabaseClient, branchId: string, companyId: s
   const shiftEnd = addDays(shiftStart, 6)
   const [areas, positions, templates, templatePositions, zones, memberships, users, shifts, breaks, absences, bins, memberPositions, wastePositions, inspectionTemplates, inspectionItems, scheduledTasks] = await Promise.all([
     admin.from("restaurant_areas").select("id, name, sort_order, is_active").eq("branch_id", branchId).order("sort_order"),
-    admin.from("restaurant_positions").select("id, name, is_active").eq("branch_id", branchId).order("name"),
+    admin.from("restaurant_positions").select("id, name, is_active, area_id").eq("branch_id", branchId).order("name"),
     admin.from("restaurant_activity_templates").select("*").eq("branch_id", branchId).order("name"),
     admin.from("restaurant_activity_positions").select("activity_template_id, position_id").eq("branch_id", branchId),
     admin.from("restaurant_activity_zones").select("id, activity_template_id, name, estimated_minutes, difficulty, sort_order").eq("branch_id", branchId).order("sort_order"),
@@ -165,6 +225,13 @@ async function getSettings(admin: SupabaseClient, branchId: string, companyId: s
 }
 
 async function getNotificationInbox(admin: SupabaseClient, branchId: string, userId: string) {
+  const operationalState = assertNoError(await admin.from("restaurant_member_operational_states")
+    .select("state").eq("branch_id", branchId).eq("employee_id", userId).maybeSingle())
+  const activeMeal = assertNoError(await admin.from("restaurant_meal_sessions").select("id")
+    .eq("branch_id", branchId).eq("employee_id", userId).is("return_confirmed_at", null).limit(1)) ?? []
+  if (["meal", "rest"].includes(String(operationalState?.state)) || activeMeal.length > 0) {
+    return { notifications: [], unread_count: 0, delivery_paused: true }
+  }
   const [notifications, unread] = await Promise.all([
     admin.from("restaurant_notifications")
       .select("id, notification_type, title, body, entity_type, entity_id, data, created_at, read_at")
@@ -208,7 +275,7 @@ async function getNotificationInbox(admin: SupabaseClient, branchId: string, use
 
 async function getDashboard(admin: SupabaseClient, branchId: string, userId: string) {
   const branch = assertNoError(await admin.from("restaurant_branches")
-    .select("id, name, timezone, enable_time_clock, require_gps_for_time_clock").eq("id", branchId).single())
+    .select("id, name, timezone, enable_time_clock, require_gps_for_time_clock, meal_duration_minutes").eq("id", branchId).single())
   const localDate = dateInZone(branch.timezone)
   const localClock = new Intl.DateTimeFormat("en-GB", {
     timeZone: branch.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
@@ -338,7 +405,7 @@ async function getDashboard(admin: SupabaseClient, branchId: string, userId: str
   const resultRows = assertNoError(results) ?? []
   const areaInspectionResultRows = assertNoError(areaInspectionResults) ?? []
   const areaInspectionItemRows = assertNoError(areaInspectionItems) ?? []
-  const tasksForClient = data.tasks.map((task: Record<string, unknown>) => {
+  const allTasksForClient = data.tasks.map((task: Record<string, unknown>) => {
     const template = data.templates.find((row: Record<string, unknown>) => row.id === task.activity_template_id) ?? null
     const taskParts = data.parts.filter((part: Record<string, unknown>) => part.task_id === task.id)
       .map((part: Record<string, unknown>) => ({
@@ -385,6 +452,9 @@ async function getDashboard(admin: SupabaseClient, branchId: string, userId: str
   const userById = new Map(userRows.map((user: Record<string, unknown>) => [user.id, user.full_name]))
   const currentMembership = data.members.find((member: Record<string, unknown>) => member.user_id === userId)
   const canManage = ["admin", "supervisor"].includes(String(currentMembership?.access_role))
+  const tasksForClient = canManage ? allTasksForClient : allTasksForClient.filter((task: Record<string, unknown>) =>
+    task.assigned_to === userId || (Array.isArray(task.parts) && (task.parts as Record<string, unknown>[])
+      .some((part) => part.assigned_to === userId)))
   return {
     branch, local_date: localDate,
     areas: data.areas.filter((area: Record<string, unknown>) => area.is_active === true)
@@ -423,14 +493,27 @@ async function getDashboard(admin: SupabaseClient, branchId: string, userId: str
     })),
     my_absences: data.myAbsences,
     tasks: tasksForClient,
-    incidents: data.incidents.map((incident: Record<string, unknown>) => ({
+    incidents: canManage ? data.incidents.map((incident: Record<string, unknown>) => ({
       ...incident,
       assignee_name: userById.get(incident.assigned_to) ?? null,
       area_name: data.areas.find((area: Record<string, unknown>) => area.id === incident.area_id)?.name ?? null,
-    })),
-    members: data.members.map((member: Record<string, unknown>) => ({
+    })) : [],
+    members: (canManage ? data.members : data.members.filter((member: Record<string, unknown>) => member.user_id === userId)).map((member: Record<string, unknown>) => ({
       ...member, user_name: userById.get(member.user_id) ?? null,
     })),
+    ...(canManage ? {} : { coworker_tasks: allTasksForClient
+      .filter((task: Record<string, unknown>) => task.status !== "completed" && (
+        (task.assigned_to != null && task.assigned_to !== userId) ||
+        (Array.isArray(task.parts) && (task.parts as Record<string, unknown>[])
+          .some((part) => part.assigned_to != null && part.assigned_to !== userId && part.status !== "completed"))
+      ))
+      .map((task: Record<string, unknown>) => ({
+        id: task.id, name: task.name, area_id: task.area_id, area_name: task.area_name,
+        assigned_to: task.assigned_to, assignee_name: task.assignee_name, status: task.status,
+        requires_evidence: task.requires_evidence, evidence_policy: task.evidence_policy,
+        parts: (Array.isArray(task.parts) ? task.parts : []).filter((part: Record<string, unknown>) =>
+          part.assigned_to != null && part.assigned_to !== userId && part.status !== "completed"),
+      })) }),
     active_time_sessions: canManage ? data.activeTimeSessions.map((session: Record<string, unknown>) => ({
       ...session, employee_name: userById.get(session.employee_id) ?? null,
       clock_in_local_time: timeInZone(branch.timezone, session.clock_in_at),
@@ -525,6 +608,9 @@ async function autoAssign(admin: SupabaseClient, branchId: string, requestId: st
     admin.from("restaurant_member_positions").select("user_id, position_id").eq("branch_id", branchId),
     admin.from("restaurant_waste_positions").select("position_id").eq("branch_id", branchId),
   ])
+  const operationalStateRows = assertNoError(await admin.from("restaurant_member_operational_states")
+    .select("employee_id, state").eq("branch_id", branchId)) ?? []
+  const operationalStateByEmployee = new Map(operationalStateRows.map((row: Record<string, string>) => [row.employee_id, row.state]))
   const data = {
     members: assertNoError(members) ?? [], shifts: assertNoError(shifts) ?? [],
     absences: assertNoError(absences) ?? [], tasks: assertNoError(tasks) ?? [], parts: assertNoError(parts) ?? [],
@@ -631,14 +717,16 @@ async function autoAssign(admin: SupabaseClient, branchId: string, requestId: st
         taskIdsForAssignmentDate.has(String(part.task_id)) && part.status !== "completed")
         .reduce((total: number, part: Record<string, number>) => total + part.estimated_minutes, 0)
     const isToday = assignmentDate === localDate
+    const operationalState = isToday ? operationalStateByEmployee.get(String(membership.user_id)) : undefined
+    const unavailableForAssignment = operationalState === "meal" || operationalState === "rest" || operationalState === "off_shift"
     return {
       id: String(membership.user_id),
       positionIds: data.memberPositions.filter((row: Record<string, string>) => row.user_id === membership.user_id).map((row: Record<string, string>) => row.position_id),
-      onShift: isToday ? Boolean(activeShift) : futureShiftCapacity > 0,
-      onBreak: isToday && onBreak,
+      onShift: (isToday ? Boolean(activeShift) : futureShiftCapacity > 0) && operationalState !== "off_shift",
+      onBreak: (isToday && onBreak) || unavailableForAssignment,
       absent,
       servingCustomers: isToday && Boolean(membership.customer_service_active),
-      capacityMinutes: isToday
+      capacityMinutes: unavailableForAssignment ? 0 : isToday
         ? activeShift ? Math.max(0, capacityUntilShiftEnd(activeShift) - remainingBreakMinutes(activeShift) - openMinutes) : 0
         : Math.max(0, futureShiftCapacity - targetDayOpenMinutes),
       assignedWeightedMinutes: historicWeighted + openWeighted,
@@ -965,7 +1053,7 @@ serve(async (req) => {
         const [memberRows, positions, memberPositions] = await Promise.all([
           admin.from("restaurant_memberships").select("user_id, access_role, is_active")
             .eq("branch_id", branchId).order("is_active", { ascending: false }),
-          admin.from("restaurant_positions").select("id, name").eq("branch_id", branchId)
+          admin.from("restaurant_positions").select("id, name, area_id").eq("branch_id", branchId)
             .eq("is_active", true).order("name"),
           admin.from("restaurant_member_positions").select("user_id, position_id").eq("branch_id", branchId),
         ])
@@ -990,9 +1078,9 @@ serve(async (req) => {
         const [areas, positions, branch] = await Promise.all([
           admin.from("restaurant_areas").select("id, name, sort_order, is_active")
             .eq("branch_id", branchId).order("sort_order").order("name"),
-          admin.from("restaurant_positions").select("id, name, is_active")
+          admin.from("restaurant_positions").select("id, name, is_active, area_id")
             .eq("branch_id", branchId).order("name"),
-          admin.from("restaurant_branches").select("enable_time_clock, require_gps_for_time_clock")
+          admin.from("restaurant_branches").select("enable_time_clock, require_gps_for_time_clock, meal_duration_minutes, collaboration_reservation_seconds")
             .eq("id", branchId).single(),
         ])
         return jsonResponse({
@@ -1094,6 +1182,170 @@ serve(async (req) => {
         can_manage_assignments: ["admin", "supervisor"].includes(membership.access_role) }, 200, requestId)
       }
       if (action === "notification_inbox") return jsonResponse(await getNotificationInbox(admin, branchId, user.id), 200, requestId)
+      if (action === "task_receipts") {
+        let query = admin.from("restaurant_task_receipts")
+          .select("id, task_id, employee_id, assignment_recorded_at, receipt_state, confirmed_at, confirmed_by, confirmation_channel")
+          .eq("branch_id", branchId)
+        if (!["admin", "supervisor"].includes(membership.access_role)) query = query.eq("employee_id", user.id)
+        const rows = assertNoError(await query.order("assignment_recorded_at", { ascending: false })) ?? []
+        if (!rows.length || !["admin", "supervisor"].includes(membership.access_role)) {
+          return jsonResponse({ receipts: rows }, 200, requestId)
+        }
+        const taskIds = [...new Set(rows.map((row: Record<string, unknown>) => String(row.task_id)))]
+        const [tasksResult, branchResult] = await Promise.all([
+          admin.from("restaurant_tasks").select("id, priority").eq("branch_id", branchId).in("id", taskIds),
+          admin.from("restaurant_branches").select("timezone, receipt_escalation_seconds_by_priority").eq("id", branchId).single(),
+        ])
+        const tasksById = new Map((assertNoError(tasksResult) ?? []).map((task: Record<string, unknown>) => [String(task.id), task]))
+        const escalationPolicy = assertNoError(branchResult).receipt_escalation_seconds_by_priority as Record<string, unknown>
+        const now = Date.now()
+        return jsonResponse({ receipts: rows.map((row: Record<string, unknown>) => {
+          const task = tasksById.get(String(row.task_id))
+          const priority = String(task?.priority ?? "")
+          const threshold = Number(escalationPolicy[priority])
+          const configured = Number.isInteger(threshold) && threshold >= 30 && threshold <= 86400
+          const assignedAt = Date.parse(String(row.assignment_recorded_at))
+          const dueAt = configured && Number.isFinite(assignedAt) ? assignedAt + threshold * 1000 : null
+          return { ...row, priority: task?.priority ?? null, escalation_threshold_seconds: configured ? threshold : null,
+            escalation_due_at: dueAt === null ? null : new Date(dueAt).toISOString(),
+            escalation_remaining_seconds: dueAt === null ? null : Math.max(0, Math.ceil((dueAt - now) / 1000)),
+            needs_escalation: row.receipt_state === "awaiting" && dueAt !== null && dueAt <= now }
+        }) }, 200, requestId)
+      }
+      if (action === "collaboration_inbox") {
+        const rows = assertNoError(await admin.from("restaurant_collaboration_requests")
+          .select("id, task_id, target_employee_id, created_by, request_source, manager_escalated_at, status, claimed_by, claimed_until, resolution, resolved_by, resolved_at, created_at")
+          .eq("branch_id", branchId).in("status", ["open", "claimed", "resolved", "cancelled"])
+          .order("created_at", { ascending: false }).limit(100)) ?? []
+        // Keep recent resolved notices visible so clients can reconcile stale push notifications.
+        // A claim is a reservation, not a reason to hide the notice from other eligible coworkers.
+        const availableIds = new Set(assertNoError(await admin.rpc("restaurant_get_available_collaborator_ids", { p_branch_id: branchId })) ?? [])
+        const manager = ["admin", "supervisor"].includes(membership.access_role)
+        const visible = rows.filter((row: Record<string, unknown>) => row.target_employee_id !== user.id
+          && (manager || row.status === "resolved" || row.status === "cancelled" || availableIds.has(user.id)))
+        const taskIds = [...new Set(visible.map((row: Record<string, unknown>) => String(row.task_id)))]
+        const tasks = taskIds.length ? assertNoError(await admin.from("restaurant_tasks")
+          .select("id, name, area_id, scheduled_for, status, assigned_to")
+          .eq("branch_id", branchId).in("id", taskIds)) ?? [] : []
+        const taskById = new Map(tasks.map((task: Record<string, unknown>) => [task.id, task]))
+        return jsonResponse({ requests: visible.map((row: Record<string, unknown>) => ({
+          ...row, task: taskById.get(row.task_id) ?? null,
+        })) }, 200, requestId)
+      }
+      if (action === "operational_workspace") {
+        const canManage = ["admin", "supervisor"].includes(membership.access_role)
+        const employeeFilter = canManage ? null : user.id
+        const [branchConfig, states, meals, reports, reviews, mealPlans, mealSlots, recommendations] = await Promise.all([
+          admin.from("restaurant_branches").select("timezone").eq("id", branchId).single(),
+          admin.from("restaurant_member_operational_states").select("*").eq("branch_id", branchId),
+          admin.from("restaurant_meal_sessions").select("*").eq("branch_id", branchId).is("return_confirmed_at", null),
+          admin.from("restaurant_task_reports").select("*").eq("branch_id", branchId)
+            .order("recorded_at", { ascending: false }).limit(100),
+          admin.from("restaurant_task_report_reviews").select("*").eq("branch_id", branchId)
+            .order("reviewed_at", { ascending: false }).limit(200),
+          admin.from("restaurant_meal_plan_proposals").select("*").eq("branch_id", branchId)
+            .order("generated_at", { ascending: false }).limit(50),
+          admin.from("restaurant_meal_plan_slots").select("*").eq("branch_id", branchId)
+            .order("starts_at", { ascending: true }).limit(500),
+          admin.from("restaurant_operational_recommendations").select("*").eq("branch_id", branchId)
+            .order("created_at", { ascending: false }).limit(100),
+        ])
+        const allReports = assertNoError(reports) ?? []
+        const visibleReports = canManage ? allReports : allReports.filter((row: Record<string, unknown>) =>
+          row.responsible_employee_id === user.id || row.recorded_by === user.id)
+        const reportIds = visibleReports.map((row: Record<string, unknown>) => row.id)
+        const branchTimezone = assertNoError(branchConfig).timezone
+        const today = dateInZone(branchTimezone)
+        const visibleMealSlots = (assertNoError(mealSlots) ?? []).filter((slot: Record<string, unknown>) =>
+          (canManage || slot.employee_id === user.id) && dateInZone(branchTimezone, new Date(String(slot.starts_at))) >= today)
+          .map((slot: Record<string, unknown>) => ({ ...slot,
+            starts_at_local: `${dateInZone(branchTimezone, new Date(String(slot.starts_at)))} ${timeInZone(branchTimezone, slot.starts_at)}`,
+            scheduled_end_at_local: `${dateInZone(branchTimezone, new Date(String(slot.scheduled_end_at)))} ${timeInZone(branchTimezone, slot.scheduled_end_at)}`,
+          }))
+        let peerMealCandidates: Record<string, unknown>[] = []
+        let canRecordPeerMeals = canManage
+        if (!canManage) {
+          const availableActorIds = new Set(assertNoError(await admin.rpc(
+            "restaurant_get_available_collaborator_ids", { p_branch_id: branchId },
+          )) ?? [])
+          canRecordPeerMeals = availableActorIds.has(user.id)
+          const previousDate = addDays(today, -1)
+          const [rosterResult, shiftsResult, absencesResult, taskResult, partResult] = await Promise.all([
+            admin.from("restaurant_memberships").select("user_id").eq("branch_id", branchId).eq("is_active", true),
+            admin.from("restaurant_shifts").select("id, employee_id, shift_date, start_time, end_time, status")
+              .eq("branch_id", branchId).eq("status", "published").gte("shift_date", previousDate).lte("shift_date", today),
+            admin.from("restaurant_absences").select("employee_id").eq("branch_id", branchId).eq("status", "approved")
+              .lte("start_date", today).gte("end_date", today),
+            admin.from("restaurant_tasks").select("assigned_to").eq("branch_id", branchId).eq("status", "in_progress"),
+            admin.from("restaurant_task_parts").select("assigned_to").eq("branch_id", branchId).eq("status", "in_progress"),
+          ])
+          const rosterIds = new Set((assertNoError(rosterResult) ?? []).map((row: Record<string, unknown>) => String(row.user_id)))
+          const absentIds = new Set((assertNoError(absencesResult) ?? []).map((row: Record<string, unknown>) => String(row.employee_id)))
+          const busyIds = new Set([
+            ...(assertNoError(taskResult) ?? []).map((row: Record<string, unknown>) => String(row.assigned_to ?? "")),
+            ...(assertNoError(partResult) ?? []).map((row: Record<string, unknown>) => String(row.assigned_to ?? "")),
+          ])
+          const stateByEmployee = new Map((assertNoError(states) ?? []).map((row: Record<string, unknown>) =>
+            [String(row.employee_id), String(row.state)]))
+          const mealByEmployee = new Map((assertNoError(meals) ?? []).map((row: Record<string, unknown>) =>
+            [String(row.employee_id), row]))
+          const now = new Date()
+          const localTime = timeInZone(branchTimezone, now) ?? "00:00"
+          const localMinute = minutesOfDay(localTime)
+          const onShiftIds = new Set((assertNoError(shiftsResult) ?? [])
+            .filter((shift: Record<string, string>) => isCurrentShift(shift, today, localMinute))
+            .map((shift: Record<string, unknown>) => String(shift.employee_id)))
+          const breaksResult = await admin.from("restaurant_shift_breaks")
+            .select("shift_id, start_time, end_time").eq("branch_id", branchId)
+          const scheduledBreakIds = new Set((assertNoError(shiftsResult) ?? []).filter((shift: Record<string, string>) =>
+            onShiftIds.has(String(shift.employee_id)) && (assertNoError(breaksResult) ?? []).some((br: Record<string, string>) => {
+              if (br.shift_id !== shift.id) return false
+              const breakStart = minutesOfDay(br.start_time)
+              const breakEnd = minutesOfDay(br.end_time)
+              return breakStart < breakEnd
+                ? localMinute >= breakStart && localMinute < breakEnd
+                : localMinute >= breakStart || localMinute < breakEnd
+            }))
+            .map((shift: Record<string, unknown>) => String(shift.employee_id)))
+          peerMealCandidates = [...onShiftIds]
+            .filter((employeeId) => employeeId !== user.id && rosterIds.has(employeeId))
+            .map((employeeId) => {
+              const activeMeal = mealByEmployee.get(employeeId) as Record<string, unknown> | undefined
+              const state = stateByEmployee.get(employeeId) ?? "available"
+              return {
+                employee_id: employeeId,
+                employee_name: userById.get(employeeId) ?? null,
+                state: activeMeal ? "meal" : state,
+                active_meal_session_id: activeMeal?.id ?? null,
+                can_start_meal: !activeMeal && !absentIds.has(employeeId) && !busyIds.has(employeeId)
+                  && !scheduledBreakIds.has(employeeId) && !["occupied", "meal", "rest", "off_shift"].includes(state),
+              }
+            })
+          if (peerMealCandidates.length) {
+            const names = assertNoError(await admin.from("users").select("id, full_name")
+              .in("id", peerMealCandidates.map((candidate) => String(candidate.employee_id)))) ?? []
+            const nameById = new Map((names as Record<string, unknown>[])
+              .map((row) => [String(row.id), row.full_name]))
+            peerMealCandidates = peerMealCandidates.map((candidate) => ({
+              ...candidate, employee_name: nameById.get(String(candidate.employee_id)) ?? null,
+            }))
+          }
+        }
+        return jsonResponse({
+          operational_states: (assertNoError(states) ?? []).filter((row: Record<string, unknown>) => canManage || row.employee_id === employeeFilter),
+          active_meals: (assertNoError(meals) ?? []).filter((row: Record<string, unknown>) => canManage || row.employee_id === employeeFilter),
+          peer_meal_candidates: peerMealCandidates,
+          can_record_peer_meals: canRecordPeerMeals,
+          task_reports: visibleReports,
+          task_report_reviews: (assertNoError(reviews) ?? []).filter((row: Record<string, unknown>) => reportIds.includes(row.report_id)),
+          meal_plans: canManage ? assertNoError(mealPlans) ?? [] : (assertNoError(mealPlans) ?? []).filter((plan: Record<string, unknown>) =>
+            ["approved", "modified"].includes(String(plan.status))
+            && Array.isArray(plan.approved_schedule)
+            && (plan.approved_schedule as Array<Record<string, unknown>>).some((slot) => slot.employee_id === user.id)),
+          meal_plan_slots: visibleMealSlots,
+          recommendations: canManage ? assertNoError(recommendations) ?? [] : [],
+        }, 200, requestId)
+      }
       fail(400, "INVALID_ACTION", "Unknown read action.")
     }
 
@@ -1110,8 +1362,599 @@ serve(async (req) => {
     }
 
     const branchId = requiredUuid(payload.branch_id, "branch_id")
-    const managerOnly = ["auto_assign", "assign_task", "assign_task_part", "reschedule_task", "save_area", "save_position", "save_member", "invite_member", "set_member_active", "save_member_positions", "save_waste_positions", "save_bin", "save_template", "save_inspection_template", "save_shift", "cancel_shift", "save_absence", "review_absence", "review_shift_cover_request", "save_branch_features", "save_assignment_policy", "update_incident", "schedule_tasks", "create_task"].includes(action)
+      const managerOnly = ["auto_assign", "assign_task", "assign_task_part", "reschedule_task", "save_area", "save_position", "save_member", "invite_member", "set_member_active", "save_member_positions", "save_waste_positions", "save_bin", "save_template", "save_inspection_template", "save_shift", "cancel_shift", "save_absence", "review_absence", "review_shift_cover_request", "save_branch_features", "save_assignment_policy", "update_incident", "schedule_tasks", "create_task", "request_collaborative_notice", "review_task_report", "get_task_report_evidence", "generate_meal_plan", "decide_meal_plan", "decide_recommendation", "analyze_operational_coverage", "analyze_operational_history"].includes(action)
     const membership = await memberForBranch(admin, branchId, user.id, managerOnly)
+
+    if (action === "confirm_task_receipt") {
+      const taskId = requiredUuid(payload.task_id, "task_id")
+      const result = assertNoError(await admin.rpc("confirm_restaurant_task_receipt", {
+        p_branch_id: branchId, p_task_id: taskId, p_actor_id: user.id,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "request_collaborative_notice") {
+      const taskId = requiredUuid(payload.task_id, "task_id")
+      const clientEventId = requiredUuid(payload.client_event_id, "client_event_id")
+      const noticeId = assertNoError(await admin.rpc("create_restaurant_collaboration_request", {
+        p_branch_id: branchId, p_task_id: taskId, p_actor_id: user.id, p_client_event_id: clientEventId,
+      }))
+      return jsonResponse({ request_id: noticeId }, 201, requestId)
+    }
+
+    if (action === "claim_collaborative_notice") {
+      const noticeId = requiredUuid(payload.request_id, "request_id")
+      const branchPolicy = assertNoError(await admin.from("restaurant_branches")
+        .select("collaboration_reservation_seconds").eq("id", branchId).single())
+      const reservationSeconds = Number(branchPolicy.collaboration_reservation_seconds)
+      if (!Number.isInteger(reservationSeconds)) fail(409, "COLLABORATION_RESERVATION_NOT_CONFIGURED", "La sucursal debe configurar el tiempo de reserva de avisos.")
+      const result = assertNoError(await admin.rpc("claim_restaurant_collaboration_request", {
+        p_branch_id: branchId, p_request_id: noticeId, p_actor_id: user.id,
+        p_reservation_seconds: reservationSeconds,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "resolve_collaborative_notice") {
+      const noticeId = requiredUuid(payload.request_id, "request_id")
+      const resolution = requiredString(payload.resolution, "resolution", 24)
+      const result = assertNoError(await admin.rpc("resolve_restaurant_collaboration_request", {
+        p_branch_id: branchId, p_request_id: noticeId, p_actor_id: user.id, p_resolution: resolution,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "record_task_report") {
+      const declaredAt = typeof payload.declared_completed_at === "string"
+        ? new Date(payload.declared_completed_at) : new Date()
+      if (!Number.isFinite(declaredAt.getTime()) || declaredAt.getTime() > Date.now() + 60_000) {
+        fail(400, "INVALID_DECLARED_COMPLETION_TIME", "La hora declarada debe ser válida y no futura.")
+      }
+      const evidencePath = typeof payload.evidence_path === "string" ? requiredString(payload.evidence_path, "evidence_path", 1024) : null
+      const reportId = assertNoError(await admin.rpc("restaurant_record_task_report", {
+        p_branch_id: branchId, p_task_id: requiredUuid(payload.task_id, "task_id"),
+        p_part_id: payload.part_id == null ? null : requiredUuid(payload.part_id, "part_id"),
+        p_responsible_employee_id: requiredUuid(payload.responsible_employee_id, "responsible_employee_id"),
+        p_recorded_by: user.id, p_declared_completed_at: declaredAt.toISOString(),
+        p_evidence_path: evidencePath,
+        p_note: typeof payload.note === "string" ? payload.note.slice(0, 1000) : null,
+        p_client_event_id: requiredUuid(payload.client_event_id, "client_event_id"),
+      }))
+      return jsonResponse({ report_id: reportId, recorded_by: user.id, recorded_at: new Date().toISOString() }, 201, requestId)
+    }
+
+    if (action === "review_task_report") {
+      const result = assertNoError(await admin.rpc("restaurant_review_task_report", {
+        p_branch_id: branchId, p_report_id: requiredUuid(payload.report_id, "report_id"),
+        p_reviewer_id: user.id, p_decision: requiredString(payload.decision, "decision", 16),
+        p_note: typeof payload.note === "string" ? payload.note.slice(0, 1000) : null,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "get_task_report_evidence") {
+      const report = assertNoError(await admin.from("restaurant_task_reports")
+        .select("task_id, evidence_path").eq("branch_id", branchId)
+        .eq("id", requiredUuid(payload.report_id, "report_id")).maybeSingle())
+      if (!report || typeof report.evidence_path !== "string" || !report.evidence_path.startsWith(`${branchId}/${report.task_id}/`)) {
+        fail(404, "TASK_REPORT_EVIDENCE_NOT_FOUND", "No hay evidencia asociada a este reporte.")
+      }
+      const signed = assertNoError(await admin.storage.from("restaurant-evidence")
+        .createSignedUrl(report.evidence_path, 90))
+      return jsonResponse({ signed_url: signed.signedUrl, expires_in_seconds: 90 }, 200, requestId)
+    }
+
+    if (action === "set_operational_state") {
+      const requestedState = requiredString(payload.state, "state", 20)
+      if (["rest", "off_shift"].includes(requestedState) && !["admin", "supervisor"].includes(membership.access_role)) {
+        fail(403, "MANAGER_REQUIRED", "Solo una persona gerente puede autorizar descanso o fin de turno.")
+      }
+      const result = assertNoError(await admin.rpc("restaurant_set_operational_state", {
+        p_branch_id: branchId, p_employee_id: payload.employee_id == null ? user.id : requiredUuid(payload.employee_id, "employee_id"),
+        p_actor_id: user.id, p_state: requestedState,
+        p_note: typeof payload.note === "string" ? payload.note.slice(0, 500) : null,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "start_meal") {
+      const branch = assertNoError(await admin.from("restaurant_branches")
+        .select("timezone").eq("id", branchId).single())
+      const declaredStartedAt = declaredTimestamp(payload.declared_at, branch.timezone)
+      const result = assertNoError(await admin.rpc("restaurant_start_meal", {
+        p_branch_id: branchId, p_employee_id: payload.employee_id == null ? user.id : requiredUuid(payload.employee_id, "employee_id"),
+        p_actor_id: user.id, p_note: typeof payload.note === "string" ? payload.note.slice(0, 500) : null,
+        p_declared_started_at: declaredStartedAt,
+      }))
+      return jsonResponse({ meal_session_id: result, started: true }, 201, requestId)
+    }
+
+    if (action === "confirm_meal_return") {
+      const branch = assertNoError(await admin.from("restaurant_branches")
+        .select("timezone").eq("id", branchId).single())
+      const declaredReturnAt = declaredTimestamp(payload.declared_at, branch.timezone)
+      const result = assertNoError(await admin.rpc("restaurant_confirm_meal_return", {
+        p_branch_id: branchId, p_session_id: requiredUuid(payload.session_id, "session_id"),
+        p_actor_id: user.id, p_state: requiredString(payload.state_after_return ?? "available", "state_after_return", 20),
+        p_declared_return_at: declaredReturnAt,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "generate_meal_plan") {
+      const shiftDate = requiredString(payload.shift_date, "shift_date", 10)
+      if (!isCalendarDate(shiftDate)) fail(400, "INVALID_SHIFT_DATE", "shift_date must be YYYY-MM-DD.")
+      const branch = assertNoError(await admin.from("restaurant_branches")
+        .select("timezone, meal_duration_minutes, minimum_area_coverage").eq("id", branchId).single())
+      if (shiftDate < dateInZone(branch.timezone)) fail(400, "INVALID_SHIFT_DATE", "No se pueden generar propuestas para fechas pasadas.")
+      const duration = Number(branch.meal_duration_minutes)
+      if (!Number.isInteger(duration) || duration < 1 || duration > 240) fail(409, "MEAL_DURATION_NOT_CONFIGURED", "Configura la duración autorizada de comida en la sucursal antes de planificar.")
+      const mealDayStart = localClockToUtc(shiftDate, "00:00", branch.timezone)
+      const mealDayEnd = localClockToUtc(addDays(shiftDate, 1), "00:00", branch.timezone)
+      const [shiftsResult, breaksResult, absencesResult, membershipsResult, positionsResult, memberPositionsResult, statesResult, mealsResult, consumedMealsResult, tasksResult, areasResult] = await Promise.all([
+        admin.from("restaurant_shifts").select("id, employee_id, start_time, end_time").eq("branch_id", branchId).eq("shift_date", shiftDate).eq("status", "published"),
+        admin.from("restaurant_shift_breaks").select("shift_id, start_time, end_time").eq("branch_id", branchId),
+        admin.from("restaurant_absences").select("employee_id").eq("branch_id", branchId).eq("status", "approved").lte("start_date", shiftDate).gte("end_date", shiftDate),
+        admin.from("restaurant_memberships").select("user_id, is_active").eq("branch_id", branchId).eq("is_active", true),
+        admin.from("restaurant_positions").select("id, area_id").eq("branch_id", branchId).eq("is_active", true),
+        admin.from("restaurant_member_positions").select("user_id, position_id").eq("branch_id", branchId),
+        admin.from("restaurant_member_operational_states").select("employee_id, state").eq("branch_id", branchId),
+        admin.from("restaurant_meal_sessions").select("employee_id").eq("branch_id", branchId).is("return_confirmed_at", null),
+        admin.from("restaurant_meal_sessions").select("employee_id").eq("branch_id", branchId).gte("started_at", mealDayStart).lt("started_at", mealDayEnd),
+        admin.from("restaurant_tasks").select("id, assigned_to").eq("branch_id", branchId).eq("scheduled_for", shiftDate).eq("status", "in_progress"),
+        admin.from("restaurant_areas").select("id, name").eq("branch_id", branchId).eq("is_active", true),
+      ])
+      const shifts = assertNoError(shiftsResult) ?? []
+      if (!shifts.length) fail(409, "PUBLISHED_SHIFTS_REQUIRED", "No hay turnos publicados para generar una propuesta de comida.")
+      const absent = new Set((assertNoError(absencesResult) ?? []).map((row: { employee_id: string }) => row.employee_id))
+      const activeMembers = new Set((assertNoError(membershipsResult) ?? []).map((row: { user_id: string }) => row.user_id))
+      const currentUnavailable = new Set<string>(shiftDate === dateInZone(branch.timezone) ? [
+        ...(assertNoError(statesResult) ?? []).filter((row: { state: string }) => ["meal", "rest", "off_shift"].includes(row.state)).map((row: { employee_id: string }) => row.employee_id),
+        ...(assertNoError(mealsResult) ?? []).map((row: { employee_id: string }) => row.employee_id),
+      ] : [])
+      const alreadyAte = new Set((assertNoError(consumedMealsResult) ?? []).map((row: { employee_id: string }) => row.employee_id))
+      const inProgressTasks = assertNoError(tasksResult) ?? []
+      const inProgressTaskIds = inProgressTasks.map((row: { id: string }) => row.id)
+      const inProgressParts = inProgressTaskIds.length
+        ? assertNoError(await admin.from("restaurant_task_parts").select("assigned_to").eq("branch_id", branchId).in("task_id", inProgressTaskIds).eq("status", "in_progress")) ?? []
+        : []
+      const inProgress = new Set<string>([
+        ...inProgressTasks.map((row: { assigned_to: string | null }) => row.assigned_to).filter((id: string | null): id is string => Boolean(id)),
+        ...inProgressParts.map((row: { assigned_to: string | null }) => row.assigned_to).filter((id: string | null): id is string => Boolean(id)),
+      ])
+      const positionArea = new Map((assertNoError(positionsResult) ?? []).filter((row: { area_id: string | null }) => row.area_id).map((row: { id: string; area_id: string }) => [row.id, row.area_id]))
+      const employeeAreas = new Map<string, Set<string>>()
+      for (const row of assertNoError(memberPositionsResult) ?? []) {
+        const areaId = positionArea.get(row.position_id)
+        if (!areaId) continue
+        const values = employeeAreas.get(row.user_id) ?? new Set<string>()
+        values.add(areaId); employeeAreas.set(row.user_id, values)
+      }
+      const minimums = branch.minimum_area_coverage as Record<string, unknown>
+      const areaNames = new Map((assertNoError(areasResult) ?? []).map((row: { id: string; name: string }) => [row.id, row.name]))
+      const qualifiedCoverageShifts: Array<{ employeeId: string; areaId: string; start: number; end: number }> = []
+      for (const shift of shifts) {
+        if (absent.has(shift.employee_id) || !activeMembers.has(shift.employee_id)
+          || currentUnavailable.has(shift.employee_id)) continue
+        const mappedAreas = employeeAreas.get(shift.employee_id) ?? new Set<string>()
+        if (mappedAreas.size !== 1) continue
+        const start = Number(String(shift.start_time).slice(0, 2)) * 60 + Number(String(shift.start_time).slice(3, 5))
+        let end = Number(String(shift.end_time).slice(0, 2)) * 60 + Number(String(shift.end_time).slice(3, 5))
+        if (end <= start) end += 1440
+        qualifiedCoverageShifts.push({ employeeId: shift.employee_id, areaId: [...mappedAreas][0], start, end })
+      }
+      const areaHeadcount = new Map<string, number>()
+      for (const shift of shifts) {
+        if (absent.has(shift.employee_id) || !activeMembers.has(shift.employee_id)) continue
+        const areas = employeeAreas.get(shift.employee_id) ?? new Set<string>()
+        if (areas.size === 1) {
+          const areaId = [...areas][0]
+          areaHeadcount.set(areaId, (areaHeadcount.get(areaId) ?? 0) + 1)
+        }
+      }
+      for (const [areaId, required] of Object.entries(minimums)) {
+        if (!Number.isInteger(required) || Number(required) < 0 || !areaNames.has(areaId)) fail(409, "INVALID_AREA_COVERAGE", "Corrige la configuración de cobertura por área antes de generar la propuesta.")
+        if (Number(required) > 0 && (areaHeadcount.get(areaId) ?? 0) < Number(required) + 1) {
+          fail(409, "MEAL_COVERAGE_INFEASIBLE", `No se puede garantizar el mínimo de cobertura de ${String(areaNames.get(areaId))} durante una comida. Ajusta los turnos, puestos o mínimos.`)
+        }
+      }
+      const shiftsById = new Map(shifts.map((shift: { id: string }) => [shift.id, shift]))
+      const breaksByShift = new Map<string, Array<{ start_time: string; end_time: string }>>()
+      for (const item of assertNoError(breaksResult) ?? []) {
+        const bucket = breaksByShift.get(item.shift_id) ?? []
+        bucket.push(item); breaksByShift.set(item.shift_id, bucket)
+      }
+      const workers: Array<Record<string, unknown>> = []
+      const skippedEmployees: Array<{ employee_id: string; reason: string }> = []
+      for (const shift of shifts) {
+        const employeeId = String(shift.employee_id)
+        const reason = absent.has(employeeId) ? "approved_absence"
+          : !activeMembers.has(employeeId) ? "inactive_membership"
+          : currentUnavailable.has(employeeId) ? "currently_unavailable"
+          : alreadyAte.has(employeeId) ? "meal_already_taken"
+          : inProgress.has(employeeId) ? "task_in_progress" : null
+        if (reason) { skippedEmployees.push({ employee_id: employeeId, reason }); continue }
+        const start = Number(String(shift.start_time).slice(0, 2)) * 60 + Number(String(shift.start_time).slice(3, 5))
+        let end = Number(String(shift.end_time).slice(0, 2)) * 60 + Number(String(shift.end_time).slice(3, 5))
+        if (end <= start) end += 1440
+        if (end - start < duration) { skippedEmployees.push({ employee_id: employeeId, reason: "shift_shorter_than_meal" }); continue }
+        const blockedStartMinutes: number[] = []
+        const workerAreas = employeeAreas.get(employeeId) ?? new Set<string>()
+        const workerArea = workerAreas.size === 1 ? [...workerAreas][0] : null
+        for (let slot = 0; slot < 2880; slot += 15) {
+          if (slot < start || slot + duration > end) { blockedStartMinutes.push(slot); continue }
+          const overlapsBreak = (breaksByShift.get(shift.id) ?? []).some((item) => {
+            const breakStartClock = Number(String(item.start_time).slice(0, 2)) * 60 + Number(String(item.start_time).slice(3, 5))
+            let breakEndClock = Number(String(item.end_time).slice(0, 2)) * 60 + Number(String(item.end_time).slice(3, 5))
+            let breakStart = breakStartClock
+            if (breakEndClock <= breakStartClock) breakEndClock += 1440
+            if (breakStart < start) breakStart += 1440
+            const breakEnd = breakEndClock + (breakStart >= 1440 && breakStartClock < start ? 1440 : 0)
+            return slot < breakEnd && breakStart < slot + duration
+          })
+          let violatesCoverage = false
+          if (!overlapsBreak && workerArea) {
+            for (const [areaId, required] of Object.entries(minimums)) {
+              const minimum = Number(required)
+              if (minimum <= 0) continue
+              const areaShifts = qualifiedCoverageShifts.filter((row) => row.areaId === areaId)
+              const boundaries = new Set<number>([slot])
+              for (const row of areaShifts) {
+                if (row.start > slot && row.start < slot + duration) boundaries.add(row.start)
+                if (row.end > slot && row.end < slot + duration) boundaries.add(row.end)
+              }
+              for (const minute of boundaries) {
+                const scheduled = areaShifts.filter((row) => row.start <= minute && row.end > minute).length
+                const unavailableForMeal = workerArea === areaId && start <= minute && end > minute ? 1 : 0
+                if (scheduled - unavailableForMeal < minimum) { violatesCoverage = true; break }
+              }
+              if (violatesCoverage) break
+            }
+          }
+          if (overlapsBreak || violatesCoverage) blockedStartMinutes.push(slot)
+        }
+        workers.push({ employeeId, shiftStartMinute: start, shiftEndMinute: end, mealDurationMinutes: duration,
+          preferredMealStartMinute: Math.round(((start + end - duration) / 2) / 15) * 15, blockedStartMinutes })
+      }
+      if (!workers.length) fail(409, "NO_MEAL_CANDIDATES", "No hay trabajadores con turno publicado y elegible para incluir en la propuesta.")
+      const rangeStart = Math.max(0, Math.floor(Math.min(...workers.map((worker) => Number(worker.shiftStartMinute))) / 15) * 15)
+      const rangeEnd = Math.ceil(Math.max(...workers.map((worker) => Number(worker.shiftEndMinute))) / 15) * 15
+      const mealStartRange = Array.from({ length: Math.max(0, Math.floor((rangeEnd - rangeStart) / 15)) }, (_, index) => rangeStart + index * 15)
+      const serviceUrl = Deno.env.get("TIMEFOLD_SERVICE_URL")?.trim()
+      const token = Deno.env.get("TIMEFOLD_SERVICE_TOKEN")?.trim()
+      if (!serviceUrl || !token) fail(503, "TIMEFOLD_MEAL_PLANNER_UNAVAILABLE", "Timefold no está configurado para planificar comidas; no se generó una propuesta alternativa silenciosamente.")
+      let solveUrl: string
+      try {
+        const configured = new URL(serviceUrl)
+        solveUrl = configured.pathname.endsWith("/api/assignments/solve")
+          ? `${configured.origin}${configured.pathname.replace(/\/api\/assignments\/solve$/, "/api/meal-plans/solve")}`
+          : new URL("/api/meal-plans/solve", configured.origin).toString()
+      } catch { fail(503, "TIMEFOLD_MEAL_PLANNER_UNAVAILABLE", "La URL configurada para Timefold no es válida.") }
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 8000)
+      let response: Response
+      try {
+        response = await fetch(solveUrl, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ workers, mealStartRange }), signal: controller.signal })
+      } catch (error) {
+        console.warn("meal_plan_timefold_request_failed", { request_id: requestId, branch_id: branchId, reason: error instanceof Error && error.name === "AbortError" ? "timeout" : "request_failed" })
+        fail(503, "TIMEFOLD_MEAL_PLANNER_UNAVAILABLE", "Timefold no respondió; no se guardó una propuesta.")
+      } finally { clearTimeout(timeout) }
+      if (!response.ok) fail(response.status === 422 ? 409 : 503, response.status === 422 ? "MEAL_PLAN_INFEASIBLE" : "TIMEFOLD_MEAL_PLANNER_UNAVAILABLE", "Timefold no pudo producir un horario factible; no se guardó ninguna propuesta.")
+      const solved = await response.json() as { planner?: string; feasible?: boolean; score?: string; assignments?: Array<{ employee_id: string; start_minute: number; end_minute: number }> }
+      if (solved.planner !== "timefold" || solved.feasible !== true || !Array.isArray(solved.assignments) || solved.assignments.length !== workers.length) fail(502, "INVALID_TIMEFOLD_MEAL_PLAN", "La respuesta de Timefold no coincide con los trabajadores elegibles.")
+      const workerById = new Map(workers.map((worker) => [String(worker.employeeId), worker]))
+      const seenEmployees = new Set<string>()
+      const slots: Array<{ employee_id: string; starts_at: string; scheduled_end_at: string }> = []
+      for (const assignment of solved.assignments) {
+        const employeeId = String(assignment.employee_id)
+        const worker = workerById.get(employeeId)
+        const startMinute = Number(assignment.start_minute)
+        const endMinute = Number(assignment.end_minute)
+        if (!worker || seenEmployees.has(employeeId) || !Number.isInteger(startMinute) || startMinute % 15 !== 0
+          || endMinute - startMinute !== duration || startMinute < Number(worker.shiftStartMinute) || endMinute > Number(worker.shiftEndMinute)
+          || (worker.blockedStartMinutes as number[]).includes(startMinute)) fail(502, "INVALID_TIMEFOLD_MEAL_PLAN", "La propuesta de Timefold no respeta turno o descanso configurado.")
+        seenEmployees.add(employeeId)
+        const startDate = startMinute >= 1440 ? addDays(shiftDate, Math.floor(startMinute / 1440)) : shiftDate
+        const endDate = endMinute >= 1440 ? addDays(shiftDate, Math.floor(endMinute / 1440)) : shiftDate
+        const startClock = startMinute % 1440; const endClock = endMinute % 1440
+        const startText = `${startDate}T${String(Math.floor(startClock / 60)).padStart(2, "0")}:${String(startClock % 60).padStart(2, "0")}`
+        const endText = `${endDate}T${String(Math.floor(endClock / 60)).padStart(2, "0")}:${String(endClock % 60).padStart(2, "0")}`
+        slots.push({ employee_id: employeeId, starts_at_local: startText, scheduled_end_at_local: endText,
+          starts_at: localDateTimeToUtc(startText, branch.timezone),
+          scheduled_end_at: localDateTimeToUtc(endText, branch.timezone) })
+      }
+      const sortedSlots = [...solved.assignments].sort((a, b) => a.start_minute - b.start_minute)
+      for (let index = 1; index < sortedSlots.length; index++) {
+        if (sortedSlots[index].start_minute < sortedSlots[index - 1].end_minute) fail(502, "INVALID_TIMEFOLD_MEAL_PLAN", "La respuesta de Timefold contiene comidas simultáneas.")
+      }
+      const insertedPlan = assertNoError(await admin.from("restaurant_meal_plan_proposals").insert({
+        branch_id: branchId, shift_date: shiftDate, planner: "timefold",
+        proposed_schedule: slots.map((slot) => ({ ...slot, duration_minutes: duration })),
+        planning_inputs: { shift_date: shiftDate, timezone: branch.timezone, meal_duration_minutes: duration,
+          workers, minimum_area_coverage: minimums },
+      }).select("id, shift_date, planner, proposed_schedule, status").single())
+      return jsonResponse({ ...insertedPlan, score: solved.score, skipped_employees: skippedEmployees,
+        limitations: ["Meals are staggered one at a time to preserve configured qualified headcount conservatively.", "Only published shifts, approved absences, configured breaks, prior or active meals, operational status and in-progress tasks or parts are considered.", "Task time windows and demand forecasts are not modeled because the current task schema has no approved time window or trusted demand feed."] }, 201, requestId)
+    }
+
+    if (action === "decide_meal_plan") {
+      const planId = requiredUuid(payload.plan_id, "plan_id")
+      const decision = requiredString(payload.decision, "decision", 16)
+      const pendingPlan = assertNoError(await admin.from("restaurant_meal_plan_proposals")
+        .select("id, status, shift_date, proposed_schedule, planning_inputs")
+        .eq("branch_id", branchId).eq("id", planId).single())
+      if (pendingPlan.status !== "proposed") fail(409, "MEAL_PLAN_NOT_PENDING", "Esta propuesta ya fue resuelta.")
+      const planTimezone = String((pendingPlan.planning_inputs as Record<string, unknown>)?.timezone ?? "UTC")
+      if (String(pendingPlan.shift_date) < dateInZone(planTimezone)) fail(409, "MEAL_PLAN_EXPIRED", "No se puede aprobar una propuesta de comida para una fecha pasada.")
+      let approvedSchedule: unknown[] | null = null
+      if (decision !== "rejected") {
+        const requested = Array.isArray(payload.schedule) ? payload.schedule : pendingPlan.proposed_schedule
+        if (!Array.isArray(requested)) fail(400, "INVALID_MEAL_SCHEDULE", "El horario aprobado debe ser una lista de intervalos.")
+        const planningInputs = pendingPlan.planning_inputs as { timezone?: string; shift_date?: string; meal_duration_minutes?: number; workers?: Array<Record<string, unknown>> }
+        const workerById = new Map((planningInputs.workers ?? []).map((worker) => [String(worker.employeeId), worker]))
+        if (!workerById.size || requested.length !== workerById.size) fail(409, "INVALID_MEAL_SCHEDULE", "El horario debe conservar todas las personas elegibles de la propuesta.")
+        const rows: Array<{ employeeId: string; start: number; end: number; original: Record<string, unknown> }> = []
+        for (const item of requested) {
+          if (typeof item !== "object" || item === null) fail(400, "INVALID_MEAL_SCHEDULE", "Cada comida debe tener responsable e intervalo.")
+          const slot = item as Record<string, unknown>
+          const employeeId = requiredUuid(slot.employee_id, "employee_id")
+          const worker = workerById.get(employeeId)
+          if (!worker || rows.some((row) => row.employeeId === employeeId)) fail(400, "INVALID_MEAL_SCHEDULE", "La propuesta contiene personas duplicadas o ajenas al conjunto original.")
+          const startFromLocal = typeof slot.starts_at_local === "string"
+            ? localDateTimeToUtc(slot.starts_at_local, String(planningInputs.timezone)) : null
+          const endFromLocal = typeof slot.scheduled_end_at_local === "string"
+            ? localDateTimeToUtc(slot.scheduled_end_at_local, String(planningInputs.timezone)) : null
+          const startDate = new Date(startFromLocal ?? String(slot.starts_at ?? "")); const endDate = new Date(endFromLocal ?? String(slot.scheduled_end_at ?? ""))
+          if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime())) fail(400, "INVALID_MEAL_SCHEDULE", "Cada intervalo requiere fechas válidas.")
+          const shiftDate = String(planningInputs.shift_date)
+          const localStartDate = dateInZone(String(planningInputs.timezone), startDate)
+          const localEndDate = dateInZone(String(planningInputs.timezone), endDate)
+          const startClock = timeInZone(String(planningInputs.timezone), startDate.toISOString()) ?? ""
+          const endClock = timeInZone(String(planningInputs.timezone), endDate.toISOString()) ?? ""
+          const dayOffset = (date: string) => Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${shiftDate}T00:00:00Z`)) / 86400000)
+          const toMinute = (date: string, clock: string) => dayOffset(date) * 1440 + Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5))
+          const start = toMinute(localStartDate, startClock); const end = toMinute(localEndDate, endClock)
+          const duration = Number(planningInputs.meal_duration_minutes)
+          const blocked = Array.isArray(worker.blockedStartMinutes) ? worker.blockedStartMinutes as number[] : []
+          if (end <= start || end - start !== duration || start < Number(worker.shiftStartMinute)
+            || end > Number(worker.shiftEndMinute) || blocked.includes(start)) {
+            fail(409, "INVALID_MEAL_SCHEDULE", "El horario modificado no respeta el turno, duración o descanso configurado.")
+          }
+          rows.push({ employeeId, start, end, original: {
+            employee_id: employeeId, starts_at: startDate.toISOString(), scheduled_end_at: endDate.toISOString(), duration_minutes: duration,
+          } })
+        }
+        const ordered = [...rows].sort((a, b) => a.start - b.start)
+        for (let index = 1; index < ordered.length; index++) {
+          if (ordered[index].start < ordered[index - 1].end) fail(409, "INVALID_MEAL_SCHEDULE", "La política actual exige comidas escalonadas sin traslape.")
+        }
+        approvedSchedule = rows.map((row) => row.original)
+      }
+      const result = assertNoError(await admin.rpc("restaurant_decide_meal_plan", {
+        p_branch_id: branchId, p_plan_id: planId,
+        p_actor_id: user.id, p_decision: decision,
+        p_schedule: approvedSchedule,
+        p_note: typeof payload.note === "string" ? payload.note.slice(0, 1000) : null,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "decide_recommendation") {
+      const result = assertNoError(await admin.rpc("restaurant_decide_recommendation", {
+        p_branch_id: branchId, p_recommendation_id: requiredUuid(payload.recommendation_id, "recommendation_id"),
+        p_actor_id: user.id, p_decision: requiredString(payload.decision, "decision", 16),
+        p_note: typeof payload.note === "string" ? payload.note.slice(0, 1000) : null,
+      }))
+      return jsonResponse(result, 200, requestId)
+    }
+
+    if (action === "analyze_operational_coverage") {
+      const shiftDate = requiredString(payload.shift_date, "shift_date", 10)
+      if (!isCalendarDate(shiftDate)) fail(400, "INVALID_SHIFT_DATE", "shift_date must be YYYY-MM-DD.")
+      const branch = assertNoError(await admin.from("restaurant_branches")
+        .select("timezone, minimum_area_coverage").eq("id", branchId).single())
+      const policy = branch.minimum_area_coverage as Record<string, unknown>
+      const minimums = Object.entries(policy).filter(([, value]) => Number.isInteger(value) && Number(value) >= 0)
+      if (minimums.length === 0) fail(409, "COVERAGE_POLICY_NOT_CONFIGURED", "Configure minimum coverage by area before analyzing the schedule.")
+      if (minimums.length !== Object.keys(policy).length || minimums.some(([areaId, value]) => Number(value) > 100 || !UUID.test(areaId))) {
+        fail(409, "INVALID_AREA_COVERAGE", "La política de cobertura contiene áreas o cantidades inválidas; corrígela antes de analizar.")
+      }
+      const [shiftsResult, absencesResult, positionsResult, memberPositionsResult, statesResult, mealsResult, areasResult] = await Promise.all([
+        admin.from("restaurant_shifts").select("id, employee_id, start_time, end_time").eq("branch_id", branchId).eq("shift_date", shiftDate).eq("status", "published"),
+        admin.from("restaurant_absences").select("employee_id").eq("branch_id", branchId).eq("status", "approved").lte("start_date", shiftDate).gte("end_date", shiftDate),
+        admin.from("restaurant_positions").select("id, area_id").eq("branch_id", branchId).eq("is_active", true),
+        admin.from("restaurant_member_positions").select("user_id, position_id").eq("branch_id", branchId),
+        admin.from("restaurant_member_operational_states").select("employee_id, state").eq("branch_id", branchId),
+        admin.from("restaurant_meal_sessions").select("employee_id").eq("branch_id", branchId).is("return_confirmed_at", null),
+        admin.from("restaurant_areas").select("id, name").eq("branch_id", branchId).eq("is_active", true),
+      ])
+      const shifts = assertNoError(shiftsResult) ?? []
+      if (!shifts.length) fail(409, "PUBLISHED_SHIFTS_REQUIRED", "No hay turnos publicados para la fecha seleccionada.")
+      const absent = new Set((assertNoError(absencesResult) ?? []).map((row: { employee_id: string }) => row.employee_id))
+      const positionArea = new Map((assertNoError(positionsResult) ?? []).filter((row: { area_id: string | null }) => row.area_id).map((row: { id: string; area_id: string }) => [row.id, row.area_id]))
+      const areas = new Map((assertNoError(areasResult) ?? []).map((row: { id: string; name: string }) => [row.id, row.name]))
+      if (minimums.some(([areaId]) => !areas.has(areaId))) {
+        fail(409, "AREA_COVERAGE_AREA_INACTIVE", "La política de cobertura refiere un área inexistente o inactiva; actualiza la configuración de la sucursal.")
+      }
+      const memberAreaSets = new Map<string, Set<string>>()
+      for (const row of assertNoError(memberPositionsResult) ?? []) {
+        const areaId = positionArea.get(row.position_id)
+        if (!areaId) continue
+        const set = memberAreaSets.get(row.user_id) ?? new Set<string>()
+        set.add(areaId); memberAreaSets.set(row.user_id, set)
+      }
+      const unavailable = new Set<string>(shiftDate === dateInZone(branch.timezone) ? [
+        ...(assertNoError(statesResult) ?? []).filter((row: { state: string }) => ["meal", "rest", "off_shift"].includes(row.state)).map((row: { employee_id: string }) => row.employee_id),
+        ...(assertNoError(mealsResult) ?? []).map((row: { employee_id: string }) => row.employee_id),
+      ] : [])
+      const qualified = new Map<string, Array<{ employee_id: string; start: number; end: number }>>()
+      const ambiguousEmployees: string[] = []
+      for (const shift of shifts) {
+        if (absent.has(shift.employee_id) || unavailable.has(shift.employee_id)) continue
+        const mappedAreas = memberAreaSets.get(shift.employee_id) ?? new Set<string>()
+        if (mappedAreas.size !== 1) { if (mappedAreas.size > 1) ambiguousEmployees.push(shift.employee_id); continue }
+        const areaId = [...mappedAreas][0]
+        const start = Number(String(shift.start_time).slice(0, 2)) * 60 + Number(String(shift.start_time).slice(3, 5))
+        let end = Number(String(shift.end_time).slice(0, 2)) * 60 + Number(String(shift.end_time).slice(3, 5))
+        if (end <= start) end += 1440
+        const bucket = qualified.get(areaId) ?? []
+        bucket.push({ employee_id: shift.employee_id, start, end }); qualified.set(areaId, bucket)
+      }
+      const recommendations: Record<string, unknown>[] = []
+      for (const [areaId, minimumValue] of minimums) {
+        if (!areas.has(areaId)) continue
+        const minimum = Number(minimumValue)
+        const staff = qualified.get(areaId) ?? []
+        const shiftMinutes = shifts.map((shift: { start_time: string; end_time: string }) => {
+          const start = Number(String(shift.start_time).slice(0, 2)) * 60 + Number(String(shift.start_time).slice(3, 5))
+          let end = Number(String(shift.end_time).slice(0, 2)) * 60 + Number(String(shift.end_time).slice(3, 5))
+          if (end <= start) end += 1440
+          return { start, end }
+        })
+        const analysisStart = Math.max(0, Math.floor(Math.min(...shiftMinutes.map((row) => row.start)) / 15) * 15)
+        const analysisEnd = Math.ceil(Math.max(...shiftMinutes.map((row) => row.end)) / 15) * 15
+        for (let minute = analysisStart; minute < analysisEnd; minute += 15) {
+          const count = staff.filter((person) => person.start <= minute && person.end > minute).length
+          if (count >= minimum) continue
+          const slotDate = minute >= 1440 ? addDays(shiftDate, Math.floor(minute / 1440)) : shiftDate
+          const slotMinute = minute % 1440
+          const sourcePeriodStart = localClockToUtc(slotDate, `${String(Math.floor(slotMinute / 60)).padStart(2, "0")}:${String(slotMinute % 60).padStart(2, "0")}`, branch.timezone)
+          const endMinute = minute + 15
+          const endDate = endMinute >= 1440 ? addDays(shiftDate, Math.floor(endMinute / 1440)) : shiftDate
+          const endClockMinute = endMinute % 1440
+          const sourcePeriodEnd = localClockToUtc(endDate, `${String(Math.floor(endClockMinute / 60)).padStart(2, "0")}:${String(endClockMinute % 60).padStart(2, "0")}`, branch.timezone)
+          const areaName = areas.get(areaId) ?? areaId
+          const sourceData = { analysis: "published_shift_qualified_coverage", shift_date: shiftDate, area_id: areaId, observed_qualified_staff: count, configured_minimum: minimum, ambiguous_multi_area_employees: [...new Set(ambiguousEmployees)], coverage_semantics: "scheduled_qualification_not_physical_location", operational_state_snapshot_applied: shiftDate === dateInZone(branch.timezone) }
+          const explanation = `El horario publicado muestra ${count} persona(s) con puesto explícitamente vinculado a ${areaName}; el mínimo configurado es ${minimum}. Esto mide personal programado y calificado, no ubicación física en tiempo real.`
+          const savedId = assertNoError(await admin.rpc("restaurant_record_coverage_recommendation", {
+            p_branch_id: branchId, p_actor_id: user.id, p_period_start: sourcePeriodStart, p_period_end: sourcePeriodEnd,
+            p_source_data: sourceData, p_explanation: explanation,
+            p_suggested_action: "Revisa el horario, los puestos vinculados y la cobertura; cualquier ajuste requiere decisión del gerente.",
+          }))
+          if (savedId) recommendations.push({ id: savedId, area_id: areaId, start: sourcePeriodStart, end: sourcePeriodEnd, observed: count, minimum })
+        }
+      }
+      return jsonResponse({ shift_date: shiftDate, analyzed_shifts: shifts.length, generated_recommendations: recommendations.length, recommendations, skipped_ambiguous_employee_count: [...new Set(ambiguousEmployees)].length }, 200, requestId)
+    }
+
+    if (action === "analyze_operational_history") {
+      const startDate = requiredString(payload.start_date, "start_date", 10)
+      const endDate = requiredString(payload.end_date, "end_date", 10)
+      const branch = assertNoError(await admin.from("restaurant_branches").select("timezone").eq("id", branchId).single())
+      if (!isCalendarDate(startDate) || !isCalendarDate(endDate) || endDate < startDate
+        || endDate > dateInZone(branch.timezone)
+        || Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`) > 90 * 86400000) {
+        fail(400, "INVALID_ANALYSIS_PERIOD", "Selecciona un periodo válido de hasta 90 días.")
+      }
+      const endExclusive = addDays(endDate, 1)
+      const periodStart = localClockToUtc(startDate, "00:00", branch.timezone)
+      const periodEnd = localClockToUtc(endExclusive, "00:00", branch.timezone)
+      const [tasksResult, inspectionsResult] = await Promise.all([
+        admin.from("restaurant_tasks")
+          .select("id, scheduled_for, status, assigned_to, estimated_minutes, completed_at", { count: "exact" })
+          .eq("branch_id", branchId).gte("scheduled_for", startDate).lt("scheduled_for", endExclusive)
+          .limit(5000),
+        admin.from("restaurant_inspections")
+          .select("id, inspected_at, needs_attention_count", { count: "exact" })
+          .eq("branch_id", branchId).gte("inspected_at", periodStart).lt("inspected_at", periodEnd)
+          .limit(5000),
+      ])
+      const tasks = assertNoError(tasksResult) ?? []
+      const inspections = assertNoError(inspectionsResult) ?? []
+      if ((tasksResult.count ?? tasks.length) > tasks.length || (inspectionsResult.count ?? inspections.length) > inspections.length) {
+        fail(413, "ANALYSIS_PERIOD_TOO_LARGE", "El periodo contiene más registros de los que el análisis procesa de forma completa; reduce el rango.")
+      }
+      const assignmentEventsResult = await admin.from("restaurant_task_receipt_events")
+        .select("receipt_id, occurred_at, details", { count: "exact" })
+        .eq("branch_id", branchId).eq("event_type", "assigned")
+        .gte("occurred_at", periodStart).lt("occurred_at", periodEnd).limit(5000)
+      const assignmentEvents = assertNoError(assignmentEventsResult) ?? []
+      if ((assignmentEventsResult.count ?? assignmentEvents.length) > assignmentEvents.length) {
+        fail(413, "ANALYSIS_PERIOD_TOO_LARGE", "El periodo contiene demasiados eventos de asignación; reduce el rango.")
+      }
+      const receiptIds = [...new Set(assignmentEvents.map((event: Record<string, unknown>) => String(event.receipt_id)))]
+      const receipts = receiptIds.length ? assertNoError(await admin.from("restaurant_task_receipts")
+        .select("id, task_id").eq("branch_id", branchId).in("id", receiptIds)) ?? [] : []
+      const receiptTaskIds = [...new Set(receipts.map((receipt: Record<string, unknown>) => String(receipt.task_id)))]
+      const assignmentTasks = receiptTaskIds.length ? assertNoError(await admin.from("restaurant_tasks")
+        .select("id, estimated_minutes").eq("branch_id", branchId).in("id", receiptTaskIds)) ?? [] : []
+      const taskById = new Map(assignmentTasks.map((task: Record<string, unknown>) => [String(task.id), Number(task.estimated_minutes) || 0]))
+      const taskIdByReceipt = new Map(receipts.map((receipt: Record<string, unknown>) => [String(receipt.id), String(receipt.task_id)]))
+      const assignedWorkload = new Map<string, { assignmentEvents: number; estimatedMinutes: number }>()
+      for (const event of assignmentEvents as Array<Record<string, unknown>>) {
+        const details = event.details as Record<string, unknown> | null
+        const employeeId = typeof details?.employee_id === "string" ? details.employee_id : null
+        const taskId = taskIdByReceipt.get(String(event.receipt_id))
+        if (!employeeId || !taskId) continue
+        const current = assignedWorkload.get(employeeId) ?? { assignmentEvents: 0, estimatedMinutes: 0 }
+        current.assignmentEvents += 1
+        current.estimatedMinutes += taskById.get(taskId) ?? 0
+        assignedWorkload.set(employeeId, current)
+      }
+      const workloadRows = [...assignedWorkload.values()]
+      const estimatedMinutes = workloadRows.map((row) => row.estimatedMinutes)
+      const assignmentEventCounts = workloadRows.map((row) => row.assignmentEvents)
+      const overdueTasks = tasks.filter((task: Record<string, unknown>) => {
+        if (task.status === "completed" && typeof task.completed_at === "string") {
+          return dateInZone(branch.timezone, new Date(task.completed_at)) > String(task.scheduled_for)
+        }
+        return task.status !== "completed" && String(task.scheduled_for) < dateInZone(branch.timezone)
+      }).length
+      const inspectionsWithAttention = inspections.filter((row: Record<string, unknown>) => Number(row.needs_attention_count) > 0).length
+      const attentionResults = inspections.reduce((sum: number, row: Record<string, unknown>) => sum + (Number(row.needs_attention_count) || 0), 0)
+      const generated: Array<{ category: string; id: string | null }> = []
+      const stableSource = async (category: string, details: Record<string, unknown>) => ({
+        ...details, analysis: `actual_operational_history_${category}`,
+        period_start_local: startDate, period_end_local: endDate,
+        fingerprint: await stableFingerprint({ category, startDate, endDate }),
+      })
+      const persist = async (category: string, source: Record<string, unknown>, explanation: string, suggestedAction: string) => {
+        const id = assertNoError(await admin.rpc("restaurant_record_operational_recommendation", {
+          p_branch_id: branchId, p_actor_id: user.id, p_category: category,
+          p_period_start: periodStart, p_period_end: periodEnd, p_source_data: source,
+          p_explanation: explanation, p_suggested_action: suggestedAction,
+        }))
+        generated.push({ category, id: typeof id === "string" ? id : null })
+      }
+      if (workloadRows.length >= 2 && Math.max(...estimatedMinutes) > Math.min(...estimatedMinutes)) {
+        const source = await stableSource("workload", {
+          assigned_staff_count: workloadRows.length, assignment_event_count: assignmentEventCounts.reduce((sum, count) => sum + count, 0),
+          estimated_minutes_min: Math.min(...estimatedMinutes), estimated_minutes_max: Math.max(...estimatedMinutes),
+          assignment_events_min: Math.min(...assignmentEventCounts), assignment_events_max: Math.max(...assignmentEventCounts),
+          measure: "append_only_assignment_events_weighted_by_task_estimate_not_actual_labor_time",
+          excludes: ["divided task parts without assignment receipt events"],
+        })
+        await persist("workload", source,
+          "Los eventos append-only de asignación del periodo, ponderados por minutos estimados de las tareas, muestran variación agregada. Se excluyen partes de tareas divididas sin historial equivalente. Es una señal de revisión, no una medición de productividad ni una evaluación individual.",
+          "Revisa dificultad, disponibilidad, puesto y distribución antes de ajustar futuras asignaciones.")
+      }
+      if (overdueTasks > 0) {
+        const source = await stableSource("delay", {
+          scheduled_task_count: tasks.length, observed_past_day_tasks: overdueTasks,
+          definition: "completed_after_scheduled_local_date_or_still_open_after_that_date",
+        })
+        await persist("delay", source,
+          `${overdueTasks} tarea(s) del periodo se completaron después de su fecha local programada o siguen abiertas después de esa fecha. El esquema no define una hora límite intradía; este análisis no infiere retrasos por hora ni la causa.`,
+          "Revisa programación, restricciones y pendientes de cambio de turno; confirma los motivos con el equipo.")
+      }
+      if (attentionResults > 0) {
+        const source = await stableSource("inspection", {
+          inspection_count: inspections.length, inspections_with_attention: inspectionsWithAttention,
+          attention_item_count: attentionResults,
+        })
+        await persist("inspection", source,
+          `${attentionResults} resultado(s) de inspección requirieron atención en ${inspectionsWithAttention} inspección(es) del periodo.`,
+          "Revisa las áreas e ítems con atención registrada y define si hace falta una tarea correctiva o ajustar la frecuencia.")
+      }
+      return jsonResponse({ period: { start_date: startDate, end_date: endDate, timezone: branch.timezone },
+        source: "persisted task assignment events, scheduled tasks, and inspections", task_count: tasks.length,
+        inspection_count: inspections.length, assigned_staff_count: workloadRows.length,
+        overdue_by_scheduled_day_count: overdueTasks, inspection_attention_count: attentionResults,
+        recommendations: generated,
+        limitations: ["Estimated task minutes are not measured labor time.", "Divided task parts do not yet have equivalent append-only assignment history.", "Task schema has no intraday due time; only scheduled-day rollover is counted.", "No demand or POS data is used.", "Recommendations require a manager decision and do not trigger assignments automatically."],
+      }, 200, requestId)
+    }
 
     if (action === "request_shift_cover") {
       const shiftId = requiredUuid(payload.shift_id, "shift_id")
@@ -1232,6 +2075,7 @@ serve(async (req) => {
       if (taskRow.scheduled_for < localDate) fail(409, "TASK_DATE_PASSED", "Past activity parts cannot be reassigned.")
 
       if (assignedTo) {
+        await ensureEmployeeAvailableForNewAssignment(admin, branchId, assignedTo, taskRow.scheduled_for, localDate)
         const requiredPositionIds = (assertNoError(await admin.from("restaurant_activity_positions")
           .select("position_id").eq("branch_id", branchId).eq("activity_template_id", taskRow.activity_template_id)) ?? [])
           .map((item: Record<string, string>) => item.position_id)
@@ -1495,10 +2339,52 @@ serve(async (req) => {
     }
 
     if (action === "save_branch_features") {
-      const enableTimeClock = payload.enable_time_clock === true
-      const requireGps = enableTimeClock && payload.require_gps_for_time_clock === true
       const currentBranch = assertNoError(await admin.from("restaurant_branches")
-        .select("name, timezone").eq("id", branchId).single())
+        .select("name, timezone, enable_time_clock, require_gps_for_time_clock, receipt_escalation_seconds_by_priority, collaboration_manager_escalation_seconds").eq("id", branchId).single())
+      const enableTimeClock = payload.enable_time_clock === undefined
+        ? currentBranch.enable_time_clock === true : payload.enable_time_clock === true
+      const requireGps = enableTimeClock && (payload.require_gps_for_time_clock === undefined
+        ? currentBranch.require_gps_for_time_clock === true : payload.require_gps_for_time_clock === true)
+      const mealDuration = payload.meal_duration_minutes == null || payload.meal_duration_minutes === ""
+        ? null : Number(payload.meal_duration_minutes)
+      if (mealDuration !== null && (!Number.isInteger(mealDuration) || mealDuration < 1 || mealDuration > 240)) {
+        fail(400, "INVALID_MEAL_DURATION", "La duración de comida debe estar entre 1 y 240 minutos o dejarse sin configurar.")
+      }
+      const reservationSeconds = payload.collaboration_reservation_seconds == null || payload.collaboration_reservation_seconds === ""
+        ? null : Number(payload.collaboration_reservation_seconds)
+      if (reservationSeconds !== null && (!Number.isInteger(reservationSeconds) || reservationSeconds < 30 || reservationSeconds > 3600)) {
+        fail(400, "INVALID_RESERVATION", "El tiempo de reserva debe configurarse entre 30 y 3600 segundos o dejarse vacío.")
+      }
+      const receiptEscalation = payload.receipt_escalation_seconds_by_priority == null
+        ? undefined : payload.receipt_escalation_seconds_by_priority
+      if (receiptEscalation !== undefined && (!receiptEscalation || typeof receiptEscalation !== "object" || Array.isArray(receiptEscalation))) {
+        fail(400, "INVALID_RECEIPT_ESCALATION_POLICY", "La política de recepción debe ser un mapa de prioridad a segundos.")
+      }
+      if (receiptEscalation !== undefined && Object.entries(receiptEscalation as Record<string, unknown>)
+        .some(([priority, seconds]) => !/^[1-5]$/.test(priority) || !Number.isInteger(seconds) || Number(seconds) < 30 || Number(seconds) > 86400)) {
+        fail(400, "INVALID_RECEIPT_ESCALATION_POLICY", "Configura prioridades 1–5 con plazos enteros de 30 a 86400 segundos.")
+      }
+      const managerEscalationSeconds = payload.collaboration_manager_escalation_seconds == null
+        || payload.collaboration_manager_escalation_seconds === ""
+        ? null : Number(payload.collaboration_manager_escalation_seconds)
+      if (managerEscalationSeconds !== null
+          && (!Number.isInteger(managerEscalationSeconds) || managerEscalationSeconds < 30 || managerEscalationSeconds > 604800)) {
+        fail(400, "INVALID_MANAGER_ESCALATION_POLICY", "El plazo para escalar a gerencia debe estar entre 30 y 604800 segundos o dejarse vacío.")
+      }
+      const minimumAreaCoverage = payload.minimum_area_coverage == null ? undefined : payload.minimum_area_coverage
+      if (minimumAreaCoverage !== undefined && (!minimumAreaCoverage || typeof minimumAreaCoverage !== "object" || Array.isArray(minimumAreaCoverage))) {
+        fail(400, "INVALID_AREA_COVERAGE", "La cobertura mínima por área debe ser un objeto de configuración.")
+      }
+      if (minimumAreaCoverage !== undefined && Object.entries(minimumAreaCoverage as Record<string, unknown>)
+        .some(([areaId, value]) => !UUID.test(areaId) || !Number.isInteger(value) || Number(value) < 0 || Number(value) > 100)) {
+        fail(400, "INVALID_AREA_COVERAGE", "Cada mínimo debe ser un entero de 0 a 100 asociado a un área válida.")
+      }
+      if (minimumAreaCoverage !== undefined) {
+        const areaIds = Object.keys(minimumAreaCoverage as Record<string, unknown>)
+        const activeAreas = areaIds.length ? assertNoError(await admin.from("restaurant_areas").select("id")
+          .eq("branch_id", branchId).eq("is_active", true).in("id", areaIds)) ?? [] : []
+        if (activeAreas.length !== areaIds.length) fail(400, "INVALID_AREA_COVERAGE", "La cobertura debe referir únicamente áreas activas de esta sucursal.")
+      }
       const branchName = payload.name == null
         ? currentBranch.name : requiredString(payload.name, "name", 120)
       if (branchName.trim().length < 2) fail(400, "INVALID_BRANCH_NAME", "Branch name must contain at least two characters.")
@@ -1509,15 +2395,26 @@ serve(async (req) => {
       } catch {
         fail(400, "INVALID_TIMEZONE", "Choose a valid time zone for the branch.")
       }
-      if (!enableTimeClock) {
+      if (payload.enable_time_clock === false) {
         const activeSessions = assertNoError(await admin.from("restaurant_time_sessions")
           .select("id").eq("branch_id", branchId).is("clock_out_at", null).limit(1)) ?? []
         if (activeSessions.length) fail(409, "TIME_CLOCK_HAS_ACTIVE_SESSIONS", "Registra la salida de las sesiones activas antes de apagar el checador.")
       }
-      assertNoError(await admin.from("restaurant_branches").update({
+      const branchUpdate: Record<string, unknown> = {
         name: branchName.trim(), timezone, enable_time_clock: enableTimeClock, require_gps_for_time_clock: requireGps,
-      }).eq("id", branchId).select("id").single())
-      return jsonResponse({ name: branchName.trim(), timezone, enable_time_clock: enableTimeClock, require_gps_for_time_clock: requireGps }, 200, requestId)
+      }
+      if (payload.meal_duration_minutes !== undefined) branchUpdate.meal_duration_minutes = mealDuration
+      if (payload.collaboration_reservation_seconds !== undefined) branchUpdate.collaboration_reservation_seconds = reservationSeconds
+      if (receiptEscalation !== undefined) branchUpdate.receipt_escalation_seconds_by_priority = receiptEscalation
+      if (payload.collaboration_manager_escalation_seconds !== undefined) branchUpdate.collaboration_manager_escalation_seconds = managerEscalationSeconds
+      if (minimumAreaCoverage !== undefined) branchUpdate.minimum_area_coverage = minimumAreaCoverage
+      assertNoError(await admin.from("restaurant_branches").update(branchUpdate).eq("id", branchId).select("id").single())
+      return jsonResponse({ name: branchName.trim(), timezone, enable_time_clock: enableTimeClock,
+        require_gps_for_time_clock: requireGps, ...(payload.meal_duration_minutes !== undefined ? { meal_duration_minutes: mealDuration } : {}),
+        ...(payload.collaboration_reservation_seconds !== undefined ? { collaboration_reservation_seconds: reservationSeconds } : {}),
+        ...(receiptEscalation !== undefined ? { receipt_escalation_seconds_by_priority: receiptEscalation } : {}),
+        ...(payload.collaboration_manager_escalation_seconds !== undefined ? { collaboration_manager_escalation_seconds: managerEscalationSeconds } : {}),
+        ...(minimumAreaCoverage !== undefined ? { minimum_area_coverage: minimumAreaCoverage } : {}) }, 200, requestId)
     }
 
     if (action === "record_time_event") {
@@ -1645,6 +2542,7 @@ serve(async (req) => {
       }
 
       if (assignedTo) {
+        await ensureEmployeeAvailableForNewAssignment(admin, branchId, assignedTo, task.scheduled_for, localDate)
         if (requiredPositionIds.length === 0) fail(409, "TASK_HAS_NO_ELIGIBLE_POSITION", "Configure an eligible position before assigning this activity.")
         const member = assertNoError(await admin.from("restaurant_memberships")
           .select("user_id, customer_service_active").eq("branch_id", branchId).eq("user_id", assignedTo).eq("is_active", true).maybeSingle())
@@ -1751,6 +2649,13 @@ serve(async (req) => {
       const taskAction = requiredString(payload.task_action, "task_action", 24)
       const partId = payload.part_id == null ? null : requiredUuid(payload.part_id, "part_id")
       const evidencePath = typeof payload.evidence_path === "string" ? payload.evidence_path : null
+      if (taskAction === "complete") {
+        const taskPolicy = assertNoError(await admin.from("restaurant_tasks").select("evidence_policy")
+          .eq("branch_id", branchId).eq("id", taskId).maybeSingle())
+        if (taskPolicy?.evidence_policy === "independent_review") {
+          fail(409, "INDEPENDENT_REVIEW_REQUIRED", "Reporta la actividad para que otra persona autorizada la valide; no se puede cerrar directamente.")
+        }
+      }
       let occurredAt: string | null = null
       if (payload.offline_replay === true) {
         if (typeof payload.occurred_at !== "string") {
@@ -1847,7 +2752,10 @@ serve(async (req) => {
     if (action === "save_area" || action === "save_position") {
       const table = action === "save_area" ? "restaurant_areas" : "restaurant_positions"
       const name = requiredString(payload.name, "name", 100)
-      const row = { branch_id: branchId, name, is_active: payload.is_active !== false }
+      const row = action === "save_position"
+        ? { branch_id: branchId, name, is_active: payload.is_active !== false,
+          area_id: payload.area_id ? requiredUuid(payload.area_id, "area_id") : null }
+        : { branch_id: branchId, name, is_active: payload.is_active !== false }
       const id = payload.id ? requiredUuid(payload.id, "id") : null
       const query = id ? admin.from(table).update(row).eq("id", id).eq("branch_id", branchId)
         : admin.from(table).insert(row)
@@ -2048,6 +2956,12 @@ serve(async (req) => {
       const estimatedMinutes = Number(payload.estimated_minutes)
       const difficulty = Number(payload.difficulty)
       const priority = Number(payload.priority)
+      const evidencePolicy = payload.evidence_policy == null
+        ? (payload.requires_evidence === true ? "required" : "none")
+        : requiredString(payload.evidence_policy, "evidence_policy", 24)
+      if (!["none", "optional", "required", "independent_review"].includes(evidencePolicy)) {
+        fail(400, "INVALID_EVIDENCE_POLICY", "Elige una política de evidencia válida.")
+      }
       if (!Number.isInteger(estimatedMinutes) || estimatedMinutes < 1 || estimatedMinutes > 1440) {
         fail(400, "INVALID_ESTIMATE", "Set an estimated duration between 1 and 1,440 minutes.")
       }
@@ -2063,7 +2977,7 @@ serve(async (req) => {
         activity_type: activityType, schedule_days: days, estimated_minutes: estimatedMinutes,
         difficulty, priority,
         is_divisible: Boolean(payload.is_divisible), interruptible: payload.interruptible !== false,
-        requires_evidence: Boolean(payload.requires_evidence), is_active: payload.is_active !== false,
+        requires_evidence: evidencePolicy === "required", is_active: payload.is_active !== false,
       }
       const id = payload.id ? requiredUuid(payload.id, "id") : null
       const cleanZones = zoneRows.map((zone: Record<string, unknown>, index: number) => {
@@ -2089,6 +3003,9 @@ serve(async (req) => {
         p_requires_evidence: templatePayload.requires_evidence, p_is_active: templatePayload.is_active,
         p_position_ids: positionIds, p_zones: cleanZones,
       }))
+      assertNoError(await admin.from("restaurant_activity_templates").update({
+        evidence_policy: evidencePolicy, requires_evidence: evidencePolicy === "required",
+      }).eq("branch_id", branchId).eq("id", templateId).select("id").single())
       return jsonResponse({ id: templateId }, 200, requestId)
     }
 
@@ -2208,14 +3125,11 @@ serve(async (req) => {
       if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType) || size <= 0 || size > 10 * 1024 * 1024) {
         fail(400, "INVALID_EVIDENCE", "Use a JPEG, PNG, or WebP image up to 10 MB.")
       }
-      const task = assertNoError(await admin.from("restaurant_tasks").select("id, requires_evidence, assigned_to")
+      const task = assertNoError(await admin.from("restaurant_tasks").select("id, requires_evidence, evidence_policy, assigned_to")
         .eq("id", taskId).eq("branch_id", branchId).maybeSingle())
-      if (!task?.requires_evidence) fail(400, "EVIDENCE_NOT_REQUIRED", "This task does not request evidence.")
+      if (!task || task.evidence_policy === "none") fail(400, "EVIDENCE_NOT_ALLOWED", "Esta actividad no admite evidencia fotográfica.")
       const part = partId ? assertNoError(await admin.from("restaurant_task_parts").select("id, assigned_to")
         .eq("id", partId).eq("task_id", taskId).eq("branch_id", branchId).maybeSingle()) : null
-      if (task.assigned_to !== user.id && part?.assigned_to !== user.id && !["admin", "supervisor"].includes(membership.access_role)) {
-        fail(403, "TASK_NOT_ASSIGNED_TO_USER", "Evidence can only be attached by the assigned worker or a supervisor.")
-      }
       const objectPath = `${branchId}/${taskId}/${crypto.randomUUID()}`
       const signed = assertNoError(await admin.storage.from("restaurant-evidence").createSignedUploadUrl(objectPath))
       return jsonResponse({ object_path: objectPath, token: signed.token, signed_url: signed.signedUrl, mime_type: mimeType, file_size_bytes: size, part_id: partId }, 201, requestId)
@@ -2226,13 +3140,12 @@ serve(async (req) => {
       const partId = payload.part_id ? requiredUuid(payload.part_id, "part_id") : null
       const objectPath = requiredString(payload.object_path, "object_path", 500)
       if (!objectPath.startsWith(`${branchId}/${taskId}/`)) fail(400, "INVALID_EVIDENCE", "Evidence path does not match this branch and task.")
-      const task = assertNoError(await admin.from("restaurant_tasks").select("id, assigned_to")
+      const task = assertNoError(await admin.from("restaurant_tasks").select("id, assigned_to, evidence_policy")
         .eq("id", taskId).eq("branch_id", branchId).maybeSingle())
       const part = partId ? assertNoError(await admin.from("restaurant_task_parts").select("id, assigned_to")
         .eq("id", partId).eq("task_id", taskId).eq("branch_id", branchId).maybeSingle()) : null
-      if (!task || (task.assigned_to !== user.id && part?.assigned_to !== user.id && !["admin", "supervisor"].includes(membership.access_role))) {
-        fail(403, "TASK_NOT_ASSIGNED_TO_USER", "Evidence can only be attached by the assigned worker or a supervisor.")
-      }
+      if (!task || task.evidence_policy === "none") fail(400, "EVIDENCE_NOT_ALLOWED", "Esta actividad no admite evidencia fotográfica.")
+      if (partId && !part) fail(404, "TASK_PART_NOT_FOUND", "La parte de la actividad no pertenece a esta sucursal.")
       const signed = assertNoError(await admin.storage.from("restaurant-evidence").list(`${branchId}/${taskId}`)) ?? []
       const objectName = objectPath.split("/").at(-1)
       const storedObject = signed.find((object: Record<string, unknown>) => object.name === objectName) as Record<string, unknown> | undefined
@@ -2264,13 +3177,14 @@ serve(async (req) => {
     logRequestError(ENDPOINT, requestId, error)
     if (error instanceof OpsError) return errorResponse(requestId, error.status, error.code, error.message)
     const message = error instanceof Error ? error.message : "Unexpected server error."
-    const mapped = message.match(/TASK_NOT_FOUND|TASK_PART_NOT_FOUND|INCIDENT_NOT_FOUND|BIN_NOT_FOUND|SHIFT_COVER_REQUEST_NOT_FOUND|INVALID_TASK_TRANSITION|NOT_ON_SHIFT_OR_ON_BREAK|TASK_NOT_ASSIGNED_TO_USER|NO_ELIGIBLE_POSITION|EVIDENCE_REQUIRED|CUSTOMER_SERVICE_PRIORITY|INSPECTION_MUST_INCLUDE_EVERY_ACTIVE_BIN|INVALID_BIN_OR_STATE|INVALID_INSPECTION_RESULTS|INVALID_ACTIVITY_CONFIGURATION|INVALID_MEMBER_ROLE|INVALID_EMPLOYEE|INVALID_AREA|INVALID_POSITION|INVALID_ZONES|INVALID_URGENCY|INVALID_ASSIGNEE|BRANCH_ADMIN_REQUIRED|LAST_BRANCH_ADMIN|BRANCH_ACCESS_REQUIRED|INVALID_TIMEZONE|EMPLOYEE_NOT_IN_BRANCH|EMPLOYEE_HAS_ACTIVE_TIME_SESSION|EMPLOYEE_NOT_ACTIVE|EMPLOYEE_ABSENT|TEMPLATE_NOT_FOUND|INVALID_ACTIVITY_TEMPLATE|MANAGER_REQUIRED|TIME_CLOCK_DISABLED|TIME_CLOCK_HAS_ACTIVE_SESSIONS|NO_ACTIVE_TIME_SESSION|ACTIVE_TIME_SESSION|GPS_REQUIRED|INVALID_TIME_EVENT|IDEMPOTENCY_KEY_REUSED|INVALID_SHIFT_BREAK|INVALID_SHIFT|SHIFT_OVERLAP|SHIFT_NOT_AVAILABLE|SHIFT_NOT_OWNED_BY_REQUESTER|SHIFT_ALREADY_STARTED|SHIFT_COVER_ALREADY_PENDING|SHIFT_COVER_REQUEST_NOT_PENDING|INVALID_SHIFT_COVER_DECISION|INVALID_SHIFT_COVER_REPLACEMENT|INVALID_SHIFT_COVER_NOTE|INVALID_ABSENCE/)
+    const mapped = message.match(/TASK_NOT_FOUND|TASK_PART_NOT_FOUND|INCIDENT_NOT_FOUND|BIN_NOT_FOUND|SHIFT_COVER_REQUEST_NOT_FOUND|COLLABORATION_REQUEST_NOT_FOUND|TASK_RECEIPT_NOT_FOUND|INVALID_TASK_TRANSITION|NOT_ON_SHIFT_OR_ON_BREAK|TASK_NOT_ASSIGNED_TO_USER|NO_ELIGIBLE_POSITION|EVIDENCE_REQUIRED|TASK_EVIDENCE_REQUIRED|TASK_EVIDENCE_NOT_REGISTERED|EVIDENCE_NOT_ALLOWED|EVIDENCE_NOT_FOUND|TASK_REPORT_EVIDENCE_NOT_FOUND|RESPONSIBLE_EMPLOYEE_MISMATCH|RESPONSIBLE_EMPLOYEE_NOT_IN_BRANCH|EMPLOYEE_NOT_ON_SHIFT|ACTIVE_TASK_REQUIRES_HANDOFF|MEAL_ALREADY_ACTIVE|MEAL_NOT_ACTIVE|MEAL_ALREADY_TAKEN|MEAL_PLAN_EXPIRED|MEAL_PLAN_NOT_PENDING|MEAL_COVERAGE_INFEASIBLE|NO_MEAL_CANDIDATES|INVALID_MEAL_SCHEDULE|TIMEFOLD_MEAL_PLANNER_UNAVAILABLE|INVALID_TIMEFOLD_MEAL_PLAN|TASK_REPORT_NOT_FOUND|TASK_REPORT_ALREADY_REVIEWED|TASK_NOT_REPORTABLE|TASK_PART_NOT_REPORTABLE|TASK_PART_ALREADY_COMPLETED|INDEPENDENT_REVIEW_REQUIRED|INVALID_REPORT_DECISION|INVALID_DECLARED_COMPLETION_TIME|OPERATIONAL_EVENTS_APPEND_ONLY|CUSTOMER_SERVICE_PRIORITY|INSPECTION_MUST_INCLUDE_EVERY_ACTIVE_BIN|INVALID_BIN_OR_STATE|INVALID_INSPECTION_RESULTS|INVALID_ACTIVITY_CONFIGURATION|INVALID_MEMBER_ROLE|INVALID_EMPLOYEE|INVALID_AREA|INVALID_POSITION|INVALID_ZONES|INVALID_URGENCY|INVALID_ASSIGNEE|BRANCH_ADMIN_REQUIRED|LAST_BRANCH_ADMIN|BRANCH_ACCESS_REQUIRED|INVALID_TIMEZONE|EMPLOYEE_NOT_IN_BRANCH|EMPLOYEE_HAS_ACTIVE_TIME_SESSION|EMPLOYEE_NOT_ACTIVE|EMPLOYEE_ABSENT|TEMPLATE_NOT_FOUND|INVALID_ACTIVITY_TEMPLATE|MANAGER_REQUIRED|TIME_CLOCK_DISABLED|TIME_CLOCK_HAS_ACTIVE_SESSIONS|NO_ACTIVE_TIME_SESSION|ACTIVE_TIME_SESSION|GPS_REQUIRED|INVALID_TIME_EVENT|IDEMPOTENCY_KEY_REUSED|INVALID_SHIFT_BREAK|INVALID_SHIFT|SHIFT_OVERLAP|SHIFT_NOT_AVAILABLE|SHIFT_NOT_OWNED_BY_REQUESTER|SHIFT_ALREADY_STARTED|SHIFT_COVER_ALREADY_PENDING|SHIFT_COVER_REQUEST_NOT_PENDING|INVALID_SHIFT_COVER_DECISION|INVALID_SHIFT_COVER_REPLACEMENT|INVALID_SHIFT_COVER_NOTE|INVALID_ABSENCE|TASK_NOT_ASSIGNED|TASK_ALREADY_COMPLETED|TASK_RECEIPT_NOT_AWAITING|INVALID_RESERVATION|COLLABORATION_REQUEST_NOT_OPEN|TARGET_CANNOT_CLAIM_NOTICE|COLLABORATION_CLAIM_EXPIRED|INVALID_COLLABORATION_RESOLUTION|COLLABORATOR_NOT_AVAILABLE|INVALID_MEAL_DURATION|MEAL_DURATION_NOT_CONFIGURED|INVALID_ANALYSIS_PERIOD|ANALYSIS_PERIOD_TOO_LARGE|INVALID_OPERATIONAL_RECOMMENDATION/)
     if (mapped) {
       const code = mapped[0]
       const status = code.endsWith("_NOT_FOUND") ? 404
-        : code.startsWith("INVALID_") || code === "GPS_REQUIRED" || code === "NO_ELIGIBLE_POSITION" ? 400
+        : code === "ANALYSIS_PERIOD_TOO_LARGE" ? 413
+        : code.startsWith("INVALID_") || code.startsWith("TASK_EVIDENCE_") || code === "EVIDENCE_REQUIRED" || code === "EVIDENCE_NOT_ALLOWED" || code === "EVIDENCE_NOT_FOUND" || code === "GPS_REQUIRED" || code === "NO_ELIGIBLE_POSITION" ? 400
         : code === "TIME_CLOCK_DISABLED" || code === "TIME_CLOCK_HAS_ACTIVE_SESSIONS" || code === "NO_ACTIVE_TIME_SESSION" || code === "ACTIVE_TIME_SESSION" || code === "IDEMPOTENCY_KEY_REUSED" || code === "LAST_BRANCH_ADMIN" || code === "EMPLOYEE_HAS_ACTIVE_TIME_SESSION" || code.startsWith("SHIFT_COVER_") || (code.startsWith("SHIFT_") && code !== "SHIFT_NOT_OWNED_BY_REQUESTER") || code === "EMPLOYEE_ABSENT" || code === "EMPLOYEE_NOT_ACTIVE" ? 409
-        : code.endsWith("_REQUIRED") || code === "TASK_NOT_ASSIGNED_TO_USER" || code === "SHIFT_NOT_OWNED_BY_REQUESTER" ? 403
+        : code.endsWith("_REQUIRED") || code === "TASK_NOT_ASSIGNED_TO_USER" || code === "RESPONSIBLE_EMPLOYEE_MISMATCH" || code === "SHIFT_NOT_OWNED_BY_REQUESTER" ? 403
         : code === "SHIFT_OVERLAP" ? 409
         : 409
       const friendlyMessage = code === "LAST_BRANCH_ADMIN"

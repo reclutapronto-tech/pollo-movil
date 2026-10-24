@@ -143,12 +143,18 @@ class RestaurantOpsRepository {
     required String branchId,
     required bool enableTimeClock,
     required bool requireGps,
+    int? mealDurationMinutes,
+    bool updateMealDuration = false,
+    int? collaborationReservationSeconds,
+    bool updateCollaborationReservation = false,
   }) =>
       _invoke('POST', body: {
         'action': 'save_branch_features',
         'branch_id': branchId,
         'enable_time_clock': enableTimeClock,
         'require_gps_for_time_clock': enableTimeClock && requireGps,
+        if (updateMealDuration) 'meal_duration_minutes': mealDurationMinutes,
+        if (updateCollaborationReservation) 'collaboration_reservation_seconds': collaborationReservationSeconds,
       });
 
   Future<OpsJson> saveMemberRole({
@@ -506,6 +512,165 @@ class RestaurantOpsRepository {
       'branch_id': branchId,
       'client_event_id': _uuid.v4(),
     });
+
+  Future<List<OpsJson>> fetchTaskReceipts(String branchId) async {
+    final response = await _invoke('GET', query: {
+      'action': 'task_receipts',
+      'branch_id': branchId,
+    });
+    return (response['receipts'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+  }
+
+  Future<List<OpsJson>> fetchCollaborationInbox(String branchId) async {
+    final response = await _invoke('GET', query: {
+      'action': 'collaboration_inbox',
+      'branch_id': branchId,
+    });
+    return (response['requests'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+  }
+
+  Future<OpsJson> fetchOperationalWorkspace(String branchId) => _invoke(
+        'GET',
+        query: {'action': 'operational_workspace', 'branch_id': branchId},
+      );
+
+  Future<OpsJson> confirmTaskReceipt({
+    required String branchId,
+    required String taskId,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'confirm_task_receipt',
+        'branch_id': branchId,
+        'task_id': taskId,
+      });
+
+  Future<OpsJson> requestCollaborativeNotice({
+    required String branchId,
+    required String taskId,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'request_collaborative_notice',
+        'branch_id': branchId,
+        'task_id': taskId,
+        'client_event_id': _uuid.v4(),
+      });
+
+  Future<OpsJson> claimCollaborativeNotice({
+    required String branchId,
+    required String requestId,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'claim_collaborative_notice',
+        'branch_id': branchId,
+        'request_id': requestId,
+      });
+
+  Future<OpsJson> resolveCollaborativeNotice({
+    required String branchId,
+    required String requestId,
+    required String resolution,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'resolve_collaborative_notice',
+        'branch_id': branchId,
+        'request_id': requestId,
+        'resolution': resolution,
+      });
+
+  Future<OpsJson> recordTaskReport({
+    required String branchId,
+    required String taskId,
+    String? partId,
+    required String responsibleEmployeeId,
+    required DateTime declaredCompletedAt,
+    String? evidencePath,
+    String? note,
+  }) =>
+      _dispatchOrQueue(branchId, {
+        'action': 'record_task_report',
+        'branch_id': branchId,
+        'client_event_id': _uuid.v4(),
+        'task_id': taskId,
+        if (partId != null) 'part_id': partId,
+        'responsible_employee_id': responsibleEmployeeId,
+        'declared_completed_at': declaredCompletedAt.toUtc().toIso8601String(),
+        if (evidencePath != null) 'evidence_path': evidencePath,
+        if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+      });
+
+  Future<OpsJson> reviewTaskReport({
+    required String branchId,
+    required String reportId,
+    required String decision,
+    String? note,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'review_task_report',
+        'branch_id': branchId,
+        'report_id': reportId,
+        'decision': decision,
+        if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+      });
+
+  Future<String> getTaskReportEvidence({required String branchId, required String reportId}) async {
+    final response = await _invoke('POST', body: {
+      'action': 'get_task_report_evidence',
+      'branch_id': branchId,
+      'report_id': reportId,
+    });
+    final url = response['signed_url'];
+    final parsed = url is String ? Uri.tryParse(url) : null;
+    if (parsed == null || !const {'http', 'https'}.contains(parsed.scheme) || parsed.host.isEmpty) {
+      throw const FormatException('No se recibió una URL válida para la evidencia.');
+    }
+    return url;
+  }
+
+  Future<OpsJson> setOperationalState({
+    required String branchId,
+    required String state,
+    String? employeeId,
+    String? note,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'set_operational_state',
+        'branch_id': branchId,
+        'state': state,
+        if (employeeId != null) 'employee_id': employeeId,
+        if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+      });
+
+  Future<OpsJson> startMeal({
+    required String branchId,
+    String? employeeId,
+    String? note,
+    DateTime? declaredAt,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'start_meal',
+        'branch_id': branchId,
+        if (employeeId != null) 'employee_id': employeeId,
+        if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+        if (declaredAt != null) 'declared_at': declaredAt.toUtc().toIso8601String(),
+      });
+
+  Future<OpsJson> confirmMealReturn({
+    required String branchId,
+    required String sessionId,
+    required String stateAfterReturn,
+    DateTime? declaredAt,
+  }) =>
+      _invoke('POST', body: {
+        'action': 'confirm_meal_return',
+        'branch_id': branchId,
+        'session_id': sessionId,
+        'state_after_return': stateAfterReturn,
+        if (declaredAt != null) 'declared_at': declaredAt.toUtc().toIso8601String(),
+      });
 
   Future<OpsJson> deliverHandoff({
     required String branchId,
@@ -1535,6 +1700,21 @@ final restaurantShiftCoverRequestsProvider =
       .fetchShiftCoverRequests(branchId);
 });
 
+final restaurantCollaborationInboxProvider =
+    FutureProvider.family<List<OpsJson>, String>((ref, branchId) {
+  return ref.watch(restaurantOpsRepositoryProvider).fetchCollaborationInbox(branchId);
+});
+
+final restaurantTaskReceiptsProvider =
+    FutureProvider.family<List<OpsJson>, String>((ref, branchId) {
+  return ref.watch(restaurantOpsRepositoryProvider).fetchTaskReceipts(branchId);
+});
+
+final restaurantOperationalWorkspaceProvider =
+    FutureProvider.family<OpsJson, String>((ref, branchId) {
+  return ref.watch(restaurantOpsRepositoryProvider).fetchOperationalWorkspace(branchId);
+});
+
 final restaurantRealtimeProvider =
     StreamProvider.family<void, String>((ref, branchId) {
   final client = Supabase.instance.client;
@@ -1548,6 +1728,20 @@ final restaurantRealtimeProvider =
     client.from('restaurant_shifts').stream(primaryKey: ['id']).eq('branch_id', branchId),
     client.from('restaurant_activity_templates').stream(primaryKey: ['id']).eq('branch_id', branchId),
     client.from('restaurant_tasks').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_task_receipts').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client
+        .from('restaurant_collaboration_requests')
+        .stream(primaryKey: ['id'])
+        .eq('branch_id', branchId),
+    client.from('restaurant_member_operational_states')
+        .stream(primaryKey: ['branch_id', 'employee_id']).eq('branch_id', branchId),
+    client.from('restaurant_meal_sessions').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_meal_events').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_task_reports').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_task_report_reviews').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_meal_plan_proposals').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_meal_plan_slots').stream(primaryKey: ['id']).eq('branch_id', branchId),
+    client.from('restaurant_operational_recommendations').stream(primaryKey: ['id']).eq('branch_id', branchId),
     client.from('restaurant_task_parts').stream(primaryKey: ['id']).eq('branch_id', branchId),
     client.from('restaurant_incidents').stream(primaryKey: ['id']).eq('branch_id', branchId),
     client.from('restaurant_absences').stream(primaryKey: ['id']).eq('branch_id', branchId),

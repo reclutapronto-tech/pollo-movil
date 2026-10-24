@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowRightLeft, Bell, CalendarClock, CheckCircle2, CircleDashed, ClipboardCheck, ClipboardList, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, Bell, CalendarClock, CheckCircle2, CircleDashed, ClipboardCheck, ClipboardList, RefreshCw, Settings2, Trash2, Users } from "lucide-react";
 import { callFunctionJson } from "@/lib/function-client";
 import { mexicoTimeZones } from "@/lib/mexico-timezones";
 import { preferredRestaurantBranchId, rememberRestaurantBranchId } from "@/lib/restaurant-branch-selection";
@@ -10,10 +10,11 @@ import { useCurrentUser } from "@/lib/use-role";
 import { getSupabase } from "@/lib/supabase";
 
 type Row = Record<string, unknown>;
-type Branch = { id: string; name: string; timezone: string; access_role: string; enable_time_clock?: boolean };
-type Task = Row & { id: string; name: string; status: string; assigned_to: string | null; assignee_name?: string | null; area_name?: string | null; estimated_minutes?: number; configuration_pending?: boolean; latest_pause_note?: string | null; parts?: Row[] };
-type Dashboard = { branch?: Partial<Branch>; tasks: Task[]; incidents: Row[]; waste_bins: Row[]; shifts: Row[]; areas?: Row[]; members?: Row[]; active_time_sessions?: Row[]; today_time_sessions?: Row[]; my_time_sessions?: Row[]; handoffs?: Row[]; area_inspection_templates?: Row[]; area_inspections?: Row[]; handoff: { completed_tasks: Row[]; outstanding_tasks: Row[]; open_incidents: Row[] }; local_date: string; assignable_unassigned_count?: number; unread_notification_count?: number };
+type Branch = { id: string; name: string; timezone: string; access_role: string; enable_time_clock?: boolean; meal_duration_minutes?: number | null };
+type Task = Row & { id: string; name: string; status: string; assigned_to: string | null; assignee_name?: string | null; area_name?: string | null; estimated_minutes?: number; configuration_pending?: boolean; latest_pause_note?: string | null; requires_evidence?: boolean; evidence_policy?: string; parts?: Row[] };
+type Dashboard = { branch?: Partial<Branch>; tasks: Task[]; coworker_tasks?: Task[]; incidents: Row[]; waste_bins: Row[]; shifts: Row[]; areas?: Row[]; members?: Row[]; active_time_sessions?: Row[]; today_time_sessions?: Row[]; my_time_sessions?: Row[]; handoffs?: Row[]; area_inspection_templates?: Row[]; area_inspections?: Row[]; handoff: { completed_tasks: Row[]; outstanding_tasks: Row[]; open_incidents: Row[] }; local_date: string; assignable_unassigned_count?: number; unread_notification_count?: number };
 type AttendanceHistory = { date: string; timezone: string; can_manage: boolean; sessions: Row[] };
+type OperationalWorkspace = { operational_states: Row[]; active_meals: Row[]; peer_meal_candidates?: Row[]; can_record_peer_meals?: boolean; task_reports: Row[]; task_report_reviews: Row[]; meal_plans: Row[]; meal_plan_slots?: Row[]; recommendations: Row[] };
 
 const statusLabels: Record<string, string> = {
   pending: "Pendiente", in_progress: "En curso", paused: "Pausada", blocked: "Bloqueada", completed: "Terminada",
@@ -30,6 +31,9 @@ export default function RestaurantOperationsPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [branchId, setBranchId] = useState("");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [workspace, setWorkspace] = useState<OperationalWorkspace | null>(null);
+  const [collaborationNotices, setCollaborationNotices] = useState<Row[]>([]);
+  const [taskReceipts, setTaskReceipts] = useState<Row[]>([]);
   const [attendanceDateSelection, setAttendanceDateSelection] = useState<{ branchId: string; date: string } | null>(null);
   const [attendanceHistory, setAttendanceHistory] = useState<AttendanceHistory | null>(null);
   const [attendanceHistoryLoading, setAttendanceHistoryLoading] = useState(true);
@@ -74,8 +78,16 @@ export default function RestaurantOperationsPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await callFunctionJson<Dashboard>("restaurant_ops", { query: { action: "dashboard", branch_id: id } });
+      const [data, ops, inbox, receipts] = await Promise.all([
+        callFunctionJson<Dashboard>("restaurant_ops", { query: { action: "dashboard", branch_id: id } }),
+        callFunctionJson<OperationalWorkspace>("restaurant_ops", { query: { action: "operational_workspace", branch_id: id } }),
+        callFunctionJson<{ requests: Row[] }>("restaurant_ops", { query: { action: "collaboration_inbox", branch_id: id } }),
+        callFunctionJson<{ receipts: Row[] }>("restaurant_ops", { query: { action: "task_receipts", branch_id: id } }),
+      ]);
       setDashboard(data);
+      setWorkspace(ops);
+      setCollaborationNotices(inbox.requests ?? []);
+      setTaskReceipts(receipts.receipts ?? []);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "No se pudo cargar el turno.");
     } finally {
@@ -162,6 +174,15 @@ export default function RestaurantOperationsPage() {
       .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_inspections", filter: `branch_id=eq.${branchId}` }, refresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_inspection_templates", filter: `branch_id=eq.${branchId}` }, refresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_notifications", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_task_receipts", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_collaboration_requests", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_member_operational_states", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_meal_sessions", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_task_reports", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_task_report_reviews", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_meal_plan_proposals", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_meal_plan_slots", filter: `branch_id=eq.${branchId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "restaurant_operational_recommendations", filter: `branch_id=eq.${branchId}` }, refresh)
       .subscribe();
     return () => {
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
@@ -255,6 +276,23 @@ export default function RestaurantOperationsPage() {
 
   const tasks = dashboard?.tasks ?? [];
   const incidents = dashboard?.incidents ?? [];
+  if (!canManage) return <WorkerWorkspace
+    branch={selectedBranch}
+    branches={branches}
+    branchId={branchId}
+    dashboard={dashboard}
+    workspace={workspace}
+    notices={collaborationNotices}
+    receipts={taskReceipts}
+    userId={currentUser.userId}
+    loading={loading}
+    busy={busy}
+    error={error}
+    notice={notice}
+    onBranchChange={(id) => { rememberRestaurantBranchId(id); setBranchId(id); }}
+    onRefresh={() => void load()}
+    run={run}
+  />;
   return (
     <main className="mx-auto max-w-7xl pb-12">
       <Header title="Pollo Móvil" subtitle="Coordinación del turno; checador y GPS se activan por configuración">
@@ -286,7 +324,7 @@ export default function RestaurantOperationsPage() {
       <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.8fr)]">
         <section className={panelClass}>
           <div className="flex items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Actividades</h2><p className="text-sm text-slate-500">{counts.total} registradas para la fecha local</p></div>{canManage && <Link href="/restaurant/configuration" className="text-sm font-semibold text-amber-700 hover:underline">Editar calendario</Link>}</div>
-          {loading ? <p className="mt-6 text-sm text-slate-500">Cargando el turno…</p> : tasks.length === 0 ? <EmptyState text="Sin actividades programadas. Configura el calendario real de la sucursal para empezar." /> : <div className="mt-4 divide-y divide-stone-100 dark:divide-slate-800">{tasks.map((task) => <TaskRow key={task.id} task={task} />)}</div>}
+          {loading ? <p className="mt-6 text-sm text-slate-500">Cargando el turno…</p> : tasks.length === 0 ? <EmptyState text="Sin actividades programadas. Configura el calendario real de la sucursal para empezar." /> : <div className="mt-4 divide-y divide-stone-100 dark:divide-slate-800">{tasks.map((task) => <TaskRow key={task.id} task={task} receipt={taskReceipts.find((item) => item.task_id === task.id && item.employee_id === task.assigned_to)} canManage onRequestNotice={() => void run("request_collaborative_notice", { task_id: task.id, client_event_id: crypto.randomUUID() })} busy={busy} />)}</div>}
         </section>
         <div className="space-y-6">
           <section className={panelClass}>
@@ -406,6 +444,7 @@ export default function RestaurantOperationsPage() {
           </section>
         </div>
       </div>
+      <OperationalManagerPanel branchId={branchId} workspace={workspace} dashboard={dashboard} collaborationNotices={collaborationNotices} busy={busy} run={run} />
     </main>
   );
 }
@@ -414,13 +453,261 @@ function Header({ title, subtitle, children }: { title: string; subtitle: string
   return <header className="flex flex-col gap-4 border-b border-stone-200 pb-5 dark:border-slate-800 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-700">Operación independiente</p><h1 className="mt-1 text-3xl font-bold tracking-tight">{title}</h1><p className="mt-1 text-sm text-slate-500">{subtitle}</p></div><div className="flex flex-wrap items-center gap-2">{children}</div></header>;
 }
 
+function WorkerWorkspace({ branch, branches, branchId, dashboard, workspace, notices, receipts, userId, loading, busy, error, notice, onBranchChange, onRefresh, run }: {
+  branch: Branch | null; branches: Branch[]; branchId: string; dashboard: Dashboard | null;
+  workspace: OperationalWorkspace | null; notices: Row[]; receipts: Row[]; userId: string | null;
+  loading: boolean; busy: boolean; error: string | null; notice: string | null;
+  onBranchChange: (id: string) => void; onRefresh: () => void;
+  run: (action: string, extra?: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [declaredMealTime, setDeclaredMealTime] = useState("");
+  const ownTasks = dashboard?.tasks ?? [];
+  const peerTasks = dashboard?.coworker_tasks ?? [];
+  const state = workspace?.operational_states.find((item) => item.employee_id === userId)?.state ?? "available";
+  const meal = workspace?.active_meals.find((item) => item.employee_id === userId);
+  const myApprovedMeals = workspace?.meal_plan_slots ?? [];
+  const shift = dashboard?.shifts.find((item) => item.employee_id === userId && item.currently_active === true);
+  // Connection state is not work availability. Without an active published
+  // shift, don't present a default/missing state row as "Disponible".
+  const effectiveState = meal ? "meal" : shift ? state : "off_shift";
+  // datetime-local is branch-local wall time. The Edge Function converts it
+  // using the branch timezone; do not reinterpret it in the browser timezone.
+  const declaredMealAt = declaredMealTime || undefined;
+  type WorkerTaskUnit = { task: Task; part: Row | null; responsibleId: string | null };
+  const ownUnits: WorkerTaskUnit[] = ownTasks.flatMap((task): WorkerTaskUnit[] => {
+      const parts = (task.parts ?? []).filter((part) => part.assigned_to === userId && part.status !== "completed");
+      return parts.length ? parts.map((part) => ({ task, part, responsibleId: userId }))
+        : task.assigned_to === userId && task.status !== "completed" ? [{ task, part: null, responsibleId: userId }] : [];
+    });
+  const peerUnits: WorkerTaskUnit[] = peerTasks.flatMap((task): WorkerTaskUnit[] => {
+      const parts = (task.parts ?? []).filter((part) => part.assigned_to && part.assigned_to !== userId && part.status !== "completed");
+      return parts.length ? parts.map((part) => ({ task, part, responsibleId: String(part.assigned_to) }))
+        : task.assigned_to && task.assigned_to !== userId && task.status !== "completed" ? [{ task, part: null, responsibleId: task.assigned_to }] : [];
+    });
+  const units: WorkerTaskUnit[] = [...ownUnits, ...peerUnits];
+  return <main className="mx-auto max-w-3xl pb-12">
+    <Header title="Mi turno" subtitle="Pollo Móvil · espacio de trabajo" >
+      <select aria-label="Sucursal" className={inputClass} disabled={busy} value={branchId} onChange={(event) => onBranchChange(event.target.value)}>{branches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+      <button aria-label="Actualizar" className={secondaryClass} disabled={busy} onClick={onRefresh}><RefreshCw size={16} />Actualizar</button>
+    </Header>
+    {(error || notice) && <p role={error ? "alert" : "status"} className={`mt-4 rounded-xl px-4 py-3 text-sm ${error ? "bg-rose-50 text-rose-800" : "bg-emerald-50 text-emerald-800"}`}>{error ?? notice}</p>}
+    <section className="mt-6 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="text-xl font-bold">Mi turno</h2>
+      <p className="mt-1 text-sm text-slate-500">{branch?.name ?? "Sucursal"}{shift ? ` · ${String(shift.start_time)}–${String(shift.end_time)}` : " · No hay turno activo registrado"}</p>
+      <p className="mt-3 text-sm">Estado: <strong>{effectiveState === "meal" ? "En comida — confirma tu regreso" : effectiveState === "occupied" ? "Ocupado" : effectiveState === "rest" ? "En descanso" : effectiveState === "off_shift" ? "Fuera de turno" : "Disponible"}</strong></p>
+      <label className="mt-3 block max-w-sm text-xs font-medium text-slate-600">Hora declarada del movimiento (opcional)<input aria-label="Hora declarada del movimiento de comida" className={`${inputClass} mt-1 w-full`} type="datetime-local" value={declaredMealTime} onChange={(event) => setDeclaredMealTime(event.target.value)} /></label>
+          {meal ? <button className={`${primaryClass} mt-3`} disabled={busy} onClick={() => void run("confirm_meal_return", { session_id: meal.id, state_after_return: "available", declared_at: declaredMealAt })}>Confirmar que regresé</button>
+        : effectiveState !== "off_shift" && effectiveState !== "rest" && <div className="mt-3 flex flex-wrap gap-2">
+          <button className={primaryClass} disabled={busy || effectiveState === "meal" || branch?.meal_duration_minutes == null} title={branch?.meal_duration_minutes == null ? "La duración de comida aún no está configurada por la sucursal." : undefined} onClick={() => void run("start_meal", { declared_at: declaredMealAt })}>Iniciar comida</button>
+          <button className={secondaryClass} disabled={busy || effectiveState === "meal"} onClick={() => void run("set_operational_state", { state: effectiveState === "occupied" ? "available" : "occupied" })}>{effectiveState === "occupied" ? "Estoy disponible" : "Estoy ocupado"}</button>
+        </div>}
+    </section>
+    {workspace?.can_record_peer_meals && workspace.peer_meal_candidates?.length ? <section className="mt-6 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="flex items-center gap-2 text-xl font-bold"><Users size={20} />Registrar comida por un compañero</h2>
+      <p className="mt-1 text-sm text-slate-500">Solo compañeros con turno activo aparecen aquí. El servidor vuelve a validar la disponibilidad, el relevo de tareas y que ambos pertenezcan a la sucursal.</p>
+      <div className="mt-3 space-y-2">{workspace.peer_meal_candidates.map((candidate) => {
+        const employeeId = String(candidate.employee_id);
+        const employeeShift = dashboard?.shifts.find((item) => String(item.employee_id) === employeeId && item.currently_active === true);
+        const employeeName = String(candidate.employee_name ?? employeeShift?.employee_name ?? employeeId);
+        const activeMealSessionId = typeof candidate.active_meal_session_id === "string" ? candidate.active_meal_session_id : null;
+        const canStart = candidate.can_start_meal === true;
+        return <article key={employeeId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3">
+          <div><p className="font-semibold">{employeeName}</p><p className="text-xs text-slate-500">{activeMealSessionId ? "En comida; falta confirmar el regreso" : String(candidate.state ?? "Disponible")}</p></div>
+          {activeMealSessionId
+            ? <div className="flex flex-wrap gap-2"><button className={secondaryClass} disabled={busy || effectiveState !== "available"} onClick={() => void run("confirm_meal_return", { session_id: activeMealSessionId, state_after_return: "available", declared_at: declaredMealAt })}>Confirmar regreso disponible</button><button className={secondaryClass} disabled={busy || effectiveState !== "available"} onClick={() => void run("confirm_meal_return", { session_id: activeMealSessionId, state_after_return: "busy", declared_at: declaredMealAt })}>Confirmar regreso ocupado</button></div>
+            : <button className={secondaryClass} disabled={busy || effectiveState !== "available" || !canStart || branch?.meal_duration_minutes == null} title={!canStart ? "La persona necesita cerrar tareas activas o no está disponible para iniciar comida." : undefined} onClick={() => void run("start_meal", { employee_id: employeeId, declared_at: declaredMealAt })}>Registrar inicio de comida</button>}
+        </article>;
+      })}</div>
+    </section> : null}
+    {myApprovedMeals.length > 0 && <section className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950/20"><h2 className="font-bold">Comida programada</h2><p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Horario aprobado por gerencia; si cambia la operación, el gerente debe confirmar una modificación. El horario no inicia la comida automáticamente.</p>{myApprovedMeals.map((slot) => <p key={String(slot.id)} className="mt-3 text-sm font-semibold">{String(slot.starts_at_local)} – {String(slot.scheduled_end_at_local)}</p>)}</section>}
+    <section className="mt-6 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="flex items-center gap-2 text-xl font-bold"><ClipboardList size={20} />Mis tareas</h2>
+      {loading ? <p className="mt-4 text-sm text-slate-500">Cargando tareas…</p> : <div className="mt-3 space-y-3">{units.filter((unit) => unit.responsibleId === userId).map((unit) => <WorkerTaskCard key={`${unit.task.id}:${unit.part?.id ?? "task"}`} unit={unit} branchId={branchId} receipts={receipts} userId={userId} busy={busy} run={run} />)}{!units.some((unit) => unit.responsibleId === userId) && <EmptyState text="No tienes actividades asignadas en este momento." />}</div>}
+    </section>
+    <section className="mt-6 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="flex items-center gap-2 text-xl font-bold"><Users size={20} />Registrar actividad por un compañero</h2>
+      <p className="mt-1 text-sm text-slate-500">Quedan guardados por separado el responsable y quien registra. Registrar no equivale a verificar.</p>
+      <div className="mt-3 space-y-3">{units.filter((unit) => unit.responsibleId !== userId).map((unit) => <WorkerTaskCard key={`${unit.task.id}:${unit.part?.id ?? "task"}`} unit={unit} branchId={branchId} receipts={receipts} userId={userId} busy={busy} run={run} />)}{!units.some((unit) => unit.responsibleId !== userId) && <EmptyState text="No hay actividades abiertas de compañeros para registrar." />}</div>
+    </section>
+    <section className="mt-6 rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <h2 className="flex items-center gap-2 text-xl font-bold"><Bell size={20} />Avisos</h2>
+      <div className="mt-3 space-y-3">{notices.map((item) => {
+        const task = item.task as Row | null;
+        const resolved = item.status === "resolved";
+        const cancelled = item.status === "cancelled";
+        const claimedByMe = item.claimed_by === userId;
+        const claimedByOther = Boolean(item.claimed_by && !claimedByMe);
+        return <article key={String(item.id)} className="rounded-xl border border-stone-200 p-4 dark:border-slate-700">
+          <p className="font-semibold">{String(task?.name ?? "Aviso de compañero")}</p>
+          <p className="mt-1 text-sm text-slate-500">{resolved ? "Aviso resuelto; la actividad sigue pendiente de su propio registro y validación." : cancelled ? "La solicitud dejó de estar activa porque ya no requiere aviso." : claimedByOther ? "Otro compañero reservó el aviso." : "¿Puedes comunicarle personalmente esta instrucción?"}</p>
+          {!resolved && !cancelled && (!claimedByOther || (typeof item.claimed_until === "string" && Date.parse(item.claimed_until) <= Date.now())) && <div className="mt-3 flex flex-wrap gap-2">{!claimedByMe && <button className={secondaryClass} disabled={busy} onClick={() => void run("claim_collaborative_notice", { request_id: item.id })}>Voy a avisarle</button>}{claimedByMe && <><button className={primaryClass} disabled={busy} onClick={() => void run("resolve_collaborative_notice", { request_id: item.id, resolution: "peer_notified" })}>Ya le avisé</button><button className={secondaryClass} disabled={busy} onClick={() => void run("resolve_collaborative_notice", { request_id: item.id, resolution: "not_located" })}>No pude localizarlo</button></>}</div>}
+        </article>;
+      })}{notices.length === 0 && <EmptyState text="No hay avisos activos ni recientes." />}</div>
+    </section>
+  </main>;
+}
+
+function WorkerTaskCard({ unit, branchId, receipts, userId, busy, run }: { unit: { task: Task; part: Row | null; responsibleId: string | null }; branchId: string; receipts: Row[]; userId: string | null; busy: boolean; run: (action: string, extra?: Record<string, unknown>) => Promise<boolean> }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [declaredAt, setDeclaredAt] = useState(() => new Date().toISOString().slice(0, 16));
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const task = unit.task;
+  const part = unit.part;
+  const receipt = !part && unit.responsibleId === userId;
+  const taskStatus = String(part?.status ?? task.status);
+  const policy = String(task.evidence_policy ?? (task.requires_evidence ? "required" : "none"));
+  const submit = async () => {
+    if (!userId || !unit.responsibleId || (policy === "required" && !file)) return;
+    setUploadError(null);
+    setSubmitting(true);
+    try {
+      let evidencePath: string | null = null;
+      if (file) {
+        if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type) || file.size <= 0 || file.size > 10 * 1024 * 1024) throw new Error("Elige una imagen JPEG, PNG o WebP de hasta 10 MB.");
+        const signed = await sendAction<{ object_path: string; token: string }>({ action: "sign_evidence_upload", branch_id: branchId, task_id: task.id, part_id: part?.id ?? null, mime_type: file.type, file_size_bytes: file.size });
+        const { error } = await getSupabase().storage.from("restaurant-evidence").uploadToSignedUrl(signed.object_path, signed.token, file, { contentType: file.type, upsert: false });
+        if (error) throw error;
+        await sendAction({ action: "register_evidence", branch_id: branchId, task_id: task.id, part_id: part?.id ?? null, object_path: signed.object_path, mime_type: file.type, file_size_bytes: file.size });
+        evidencePath = signed.object_path;
+      }
+      await run("record_task_report", { task_id: task.id, part_id: part?.id ?? null, responsible_employee_id: unit.responsibleId, declared_completed_at: new Date(declaredAt).toISOString(), evidence_path: evidencePath, client_event_id: crypto.randomUUID() });
+    } catch (cause) {
+      setUploadError(cause instanceof Error ? cause.message : "No se pudo adjuntar la evidencia.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return <article className="rounded-xl border border-stone-200 p-4 dark:border-slate-700">
+    <div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold">{task.name}{part ? ` · ${String(part.zone_name ?? "Zona")}` : ""}</h3><p className="mt-1 text-sm text-slate-500">{String(task.area_name ?? "Área")}{unit.responsibleId !== userId ? ` · Responsable: ${String(part?.assignee_name ?? task.assignee_name ?? "Integrante asignado")}` : " · Responsable: tú"}</p></div><span className="text-xs font-semibold">{statusLabels[String(part?.status ?? task.status)] ?? String(part?.status ?? task.status)}</span></div>
+    {receipt && <p className="mt-3 text-xs text-slate-500">Recepción: {String(receipts.find((item) => item.task_id === task.id && item.employee_id === userId)?.receipt_state ?? "sin registro")}</p>}
+    {receipt && receipts.find((item) => item.task_id === task.id && item.employee_id === userId)?.receipt_state === "awaiting" && <button className="mt-2 rounded-lg border px-3 py-2 text-sm" disabled={busy || submitting} onClick={() => void run("confirm_task_receipt", { task_id: task.id })}>Confirmar recepción</button>}
+    {unit.responsibleId === userId && taskStatus !== "completed" && <div className="mt-3 flex flex-wrap gap-2">{taskStatus === "pending" && <button className={secondaryClass} disabled={busy || submitting} onClick={() => void run("task_action", { task_id: task.id, part_id: part?.id ?? null, task_action: "start", client_event_id: crypto.randomUUID() })}>Comenzar</button>}{taskStatus === "in_progress" && <><button className={secondaryClass} disabled={busy || submitting} onClick={() => void run("task_action", { task_id: task.id, part_id: part?.id ?? null, task_action: "pause", client_event_id: crypto.randomUUID() })}>Pausar</button>{policy !== "required" && policy !== "independent_review" && <button className={primaryClass} disabled={busy || submitting} onClick={() => void run("task_action", { task_id: task.id, part_id: part?.id ?? null, task_action: "complete", client_event_id: crypto.randomUUID() })}>Terminar</button>}</>}{["paused", "blocked"].includes(taskStatus) && <button className={secondaryClass} disabled={busy || submitting} onClick={() => void run("task_action", { task_id: task.id, part_id: part?.id ?? null, task_action: "resume", client_event_id: crypto.randomUUID() })}>Continuar</button>}</div>}
+    <label className="mt-3 block text-xs font-medium text-slate-500">Hora declarada de realización<input aria-label="Hora declarada de realización" className={`${inputClass} mt-1 w-full`} type="datetime-local" value={declaredAt} onChange={(event) => setDeclaredAt(event.target.value)} /></label>
+    {policy !== "none" && <label className="mt-3 block text-xs font-medium text-slate-500">Evidencia {policy === "required" ? "(obligatoria)" : policy === "optional" ? "(opcional)" : "(validación independiente requerida)"}<input className="mt-1 block w-full text-sm" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>}
+    {uploadError && <p role="alert" className="mt-2 text-sm text-rose-700">{uploadError}</p>}
+    <button className={`${primaryClass} mt-3`} disabled={busy || submitting || (policy === "required" && !file)} onClick={() => void submit()}>{submitting ? "Guardando…" : "Registrar actividad realizada"}</button>
+  </article>;
+}
+
+function OperationalManagerPanel({ branchId, workspace, dashboard, collaborationNotices, busy, run }: { branchId: string; workspace: OperationalWorkspace | null; dashboard: Dashboard | null; collaborationNotices: Row[]; busy: boolean; run: (action: string, extra?: Record<string, unknown>) => Promise<boolean> }) {
+  const [declaredMealTime, setDeclaredMealTime] = useState("");
+  const declaredMealAt = declaredMealTime || undefined;
+  const [historyEnd, setHistoryEnd] = useState(dashboard?.local_date ?? "");
+  const [historyStart, setHistoryStart] = useState(() => {
+    const date = dashboard?.local_date;
+    if (!date) return "";
+    const value = new Date(`${date}T00:00:00Z`); value.setUTCDate(value.getUTCDate() - 29);
+    return value.toISOString().slice(0, 10);
+  });
+  useEffect(() => {
+    const date = dashboard?.local_date;
+    if (!date) return;
+    const start = new Date(`${date}T00:00:00Z`); start.setUTCDate(start.getUTCDate() - 29);
+    setHistoryEnd(date); setHistoryStart(start.toISOString().slice(0, 10));
+  }, [dashboard?.local_date]);
+  if (!workspace) return null;
+  const pendingReports = workspace.task_reports.filter((report) => !workspace.task_report_reviews.some((review) => review.report_id === report.id));
+  const reviewedReports = workspace.task_reports.filter((report) => workspace.task_report_reviews.some((review) => review.report_id === report.id)).slice(0, 12);
+  const members = dashboard?.members ?? [];
+  const memberName = (id: unknown) => String(members.find((member) => member.user_id === id)?.user_name ?? id ?? "Integrante");
+  const escalatedNotices = collaborationNotices.filter((item) => item.status === "open" && item.manager_escalated_at != null);
+  const activeMealByEmployee = new Map(workspace.active_meals.map((meal) => [String(meal.employee_id), meal]));
+  const operationalStateByEmployee = new Map(workspace.operational_states.map((item) => [String(item.employee_id), String(item.state)]));
+  const todayShiftEmployeeIds = new Set((dashboard?.shifts ?? []).filter((shift) =>
+    shift.shift_date === dashboard?.local_date && shift.status === "published" && shift.currently_active === true).map((shift) => String(shift.employee_id)));
+  for (const employeeId of activeMealByEmployee.keys()) todayShiftEmployeeIds.add(employeeId);
+  return <section className="mt-7 grid gap-6 lg:grid-cols-2">
+    <div className={panelClass}><h2 className="text-lg font-semibold">Avisos colaborativos escalados</h2><p className="mt-1 text-sm text-slate-500">Si el plazo de sucursal está configurado y nadie atiende, gerencia recibe el escalamiento. El sistema registra el aviso, no completa la tarea ni reemplaza el seguimiento presencial.</p><div className="mt-3 space-y-2">{escalatedNotices.map((item) => { const task = item.task as Row | null; return <article key={String(item.id)} className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-900 dark:bg-amber-950/20"><p className="font-semibold">{String(task?.name ?? `Tarea ${item.task_id}`)}</p><p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Responsable: {memberName(item.target_employee_id)} · Escalado: {String(item.manager_escalated_at)}</p></article>; })}{!escalatedNotices.length && <EmptyState text="No hay avisos escalados pendientes." />}</div></div>
+    <div className={panelClass}><h2 className="text-lg font-semibold">Disponibilidad y comidas</h2><p className="mt-1 text-sm text-slate-500">Un gerente puede registrar estados y comidas de compañeros sin teléfono. Solo se muestran turnos activos; el regreso de comida requiere confirmación y no se infiere por el reloj. La hora declarada es opcional y se interpreta en la zona horaria de la sucursal.</p><label className="mt-3 block max-w-sm text-xs font-medium text-slate-600">Hora declarada del movimiento<input aria-label="Hora declarada de comida de un compañero" className={`${inputClass} mt-1 w-full`} type="datetime-local" value={declaredMealTime} onChange={(event) => setDeclaredMealTime(event.target.value)} /></label><div className="mt-3 space-y-2">{members.filter((member) => member.is_active !== false && todayShiftEmployeeIds.has(String(member.user_id))).map((member) => { const employeeId = String(member.user_id); const meal = activeMealByEmployee.get(employeeId); const state = operationalStateByEmployee.get(employeeId) ?? "available"; return <div key={employeeId} className="rounded-lg border p-3 text-sm"><p className="font-semibold">{memberName(employeeId)} · {meal ? "En comida" : state}</p>{meal ? <div className="mt-2 flex flex-wrap gap-2"><button className="rounded-lg border px-3 py-2 text-xs font-semibold" disabled={busy} onClick={() => void run("confirm_meal_return", { session_id: meal.id, state_after_return: "available", declared_at: declaredMealAt })}>Regresó disponible</button><button className="rounded-lg border px-3 py-2 text-xs font-semibold" disabled={busy} onClick={() => void run("confirm_meal_return", { session_id: meal.id, state_after_return: "busy", declared_at: declaredMealAt })}>Regresó ocupado</button></div> : <div className="mt-2 flex flex-wrap items-end gap-2"><OperationalStateControl employeeId={employeeId} initialState={state} busy={busy} run={run} /><button className="rounded-lg border px-3 py-2 text-xs font-semibold" disabled={busy || dashboard?.branch?.meal_duration_minutes == null || ["rest", "off_shift"].includes(state)} onClick={() => void run("start_meal", { employee_id: employeeId, declared_at: declaredMealAt })}>Registrar inicio de comida</button></div>}</div>; })}{!todayShiftEmployeeIds.size && <EmptyState text="No hay turnos activos para registrar disponibilidad o comidas." />}</div></div>
+    <div className={panelClass}><h2 className="text-lg font-semibold">Reportes por revisar</h2><p className="mt-1 text-sm text-slate-500">Responsable, registrador, hora declarada y hora de registro se conservan por separado.</p><div className="mt-3 space-y-3">{pendingReports.map((report) => <ManagerReportCard key={String(report.id)} report={report} branchId={branchId} responsibleName={memberName(report.responsible_employee_id)} recorderName={memberName(report.recorded_by)} busy={busy} run={run} />)}{!pendingReports.length && <EmptyState text="No hay reportes pendientes de validación." />}</div></div>
+    <div className={panelClass}><h2 className="text-lg font-semibold">Historial de validaciones</h2><p className="mt-1 text-sm text-slate-500">La acción de registrar no se confunde con la revisión independiente.</p><div className="mt-3 space-y-2">{reviewedReports.map((report) => { const review = workspace.task_report_reviews.filter((item) => item.report_id === report.id).sort((a, b) => String(b.reviewed_at).localeCompare(String(a.reviewed_at)))[0]; return <article key={String(report.id)} className="rounded-lg border p-3 text-sm"><p className="font-semibold">{String(review?.decision === "accepted" ? "Aceptado" : "Rechazado")} · responsable {memberName(report.responsible_employee_id)}</p><p className="mt-1 text-xs text-slate-500">Registró {memberName(report.recorded_by)} · declarado {String(report.declared_completed_at)} · registrado {String(report.recorded_at)} · revisó {memberName(review?.reviewer_id)}</p>{typeof review?.note === "string" && review.note.length > 0 && <p className="mt-2">{review.note}</p>}</article>; })}{!reviewedReports.length && <EmptyState text="Todavía no hay reportes revisados." />}</div></div>
+    <div className={panelClass}><h2 className="text-lg font-semibold">Propuestas de comida</h2><p className="mt-1 text-sm text-slate-500">El motor Timefold propone horarios para turnos publicados. Cada propuesta requiere aprobación humana; la comida iniciada no se modifica automáticamente.</p><button className={`${secondaryClass} mt-3`} disabled={busy || !dashboard?.local_date} onClick={() => void run("generate_meal_plan", { shift_date: dashboard?.local_date })}>Generar propuesta con Timefold</button><div className="mt-3 space-y-3">{workspace.meal_plans.filter((plan) => plan.status === "proposed").map((plan) => <MealPlanReviewCard key={String(plan.id)} plan={plan} members={members} busy={busy} onDecision={(decision, schedule) => run("decide_meal_plan", { plan_id: plan.id, decision, ...(schedule ? { schedule } : {}) })} />)}{!workspace.meal_plans.some((plan) => plan.status === "proposed") && <EmptyState text="No hay propuestas pendientes. Requiere duración de comida y turnos publicados; cobertura mínima puede hacer el problema inviable." />}</div></div>
+    <div className={panelClass}><h2 className="text-lg font-semibold">Recomendaciones operativas</h2><p className="mt-1 text-sm text-slate-500">Cada elemento conserva fuente, periodo analizado y decisión del gerente. El análisis usa registros reales de tareas, inspecciones y turnos; las estimaciones no se presentan como mediciones.</p><button className={`${secondaryClass} mt-3`} disabled={busy || !dashboard?.local_date} onClick={() => void run("analyze_operational_coverage", { shift_date: dashboard?.local_date })}>Analizar cobertura de hoy</button><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="text-xs">Desde<input aria-label="Inicio del periodo analítico" className={`${inputClass} mt-1`} type="date" value={historyStart} max={historyEnd} onChange={(event) => setHistoryStart(event.target.value)} /></label><label className="text-xs">Hasta<input aria-label="Fin del periodo analítico" className={`${inputClass} mt-1`} type="date" value={historyEnd} min={historyStart} max={dashboard?.local_date} onChange={(event) => setHistoryEnd(event.target.value)} /></label></div><button className={`${secondaryClass} mt-2`} disabled={busy || !historyStart || !historyEnd || historyEnd < historyStart} onClick={() => void run("analyze_operational_history", { start_date: historyStart, end_date: historyEnd })}>Analizar historial operativo</button><p className="mt-1 text-xs text-slate-500">Hasta 90 días. No se usa POS ni se inventa una hora límite para tareas que solo tienen fecha programada.</p><div className="mt-3 space-y-3">{workspace.recommendations.map((item) => <RecommendationCard key={String(item.id)} item={item} busy={busy} run={run} />)}{!workspace.recommendations.length && <EmptyState text="Sin recomendaciones registradas a partir de datos operativos." />}</div></div>
+  </section>;
+}
+
+function RecommendationCard({ item, busy, run }: { item: Row; busy: boolean; run: (action: string, extra?: Record<string, unknown>) => Promise<boolean> }) {
+  const [outcome, setOutcome] = useState("");
+  return <article className="rounded-xl border p-3"><p className="text-sm font-semibold">{String(item.category)} · {String(item.decision)}</p><p className="mt-1 text-sm">{String(item.explanation)}</p><p className="mt-1 text-xs text-slate-500">Periodo: {String(item.source_period_start)} – {String(item.source_period_end)} · Confianza: {item.confidence == null ? "no calculada" : String(item.confidence)}</p><details className="mt-2 text-xs"><summary>Datos fuente</summary><pre className="mt-2 overflow-auto">{JSON.stringify(item.source_data, null, 2)}</pre></details>{item.decision === "pending" && <div className="mt-3 space-y-2"><label className="block text-xs">Nota de decisión / resultado<textarea className={`${inputClass} mt-1 min-h-20 w-full py-2`} value={outcome} maxLength={1000} onChange={(event) => setOutcome(event.target.value)} placeholder="Registra el motivo o la adaptación decidida por el gerente." /></label><div className="flex flex-wrap gap-2"><button className={primaryClass} disabled={busy} onClick={() => void run("decide_recommendation", { recommendation_id: item.id, decision: "approved", note: outcome.trim() || undefined })}>Aprobar</button><button className={secondaryClass} disabled={busy || !outcome.trim()} onClick={() => void run("decide_recommendation", { recommendation_id: item.id, decision: "modified", note: outcome.trim() })}>Marcar modificada</button><button className={secondaryClass} disabled={busy} onClick={() => void run("decide_recommendation", { recommendation_id: item.id, decision: "rejected", note: outcome.trim() || undefined })}>Rechazar</button></div></div>}{typeof item.outcome_note === "string" && item.outcome_note && <p className="mt-2 text-xs text-slate-500">Nota del gerente: {String(item.outcome_note)}</p>}</article>;
+}
+
+function OperationalStateControl({ employeeId, initialState, busy, run }: {
+  employeeId: string; initialState: string; busy: boolean;
+  run: (action: string, extra?: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const [state, setState] = useState(initialState);
+  const [note, setNote] = useState("");
+  useEffect(() => { setState(initialState); }, [initialState]);
+  return <div className="flex flex-wrap items-end gap-2">
+    <label className="text-xs font-medium text-slate-600">Estado laboral
+      <select aria-label={`Estado laboral ${employeeId}`} className={`${inputClass} mt-1 min-h-9`} value={state} disabled={busy} onChange={(event) => setState(event.target.value)}>
+        <option value="available">Disponible</option><option value="occupied">Ocupado</option>
+        <option value="rest">En descanso</option><option value="off_shift">Fuera de turno</option>
+      </select>
+    </label>
+    <label className="text-xs font-medium text-slate-600">Nota opcional
+      <input aria-label={`Nota de estado ${employeeId}`} className={`${inputClass} mt-1 min-h-9`} maxLength={500} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} placeholder="Contexto operativo" />
+    </label>
+    <button className="min-h-9 rounded-lg border px-3 py-2 text-xs font-semibold" disabled={busy || state === initialState} onClick={async () => {
+      const saved = await run("set_operational_state", { employee_id: employeeId, state, note: note.trim() || undefined });
+      if (saved) setNote("");
+    }}>Guardar estado</button>
+  </div>;
+}
+
+function MealPlanReviewCard({ plan, members, busy, onDecision }: { plan: Row; members: Row[]; busy: boolean; onDecision: (decision: string, schedule?: Row[]) => Promise<boolean> }) {
+  const original = Array.isArray(plan.proposed_schedule) ? plan.proposed_schedule as Row[] : [];
+  const [schedule, setSchedule] = useState<Row[]>(original.map((slot) => ({ ...slot })));
+  const updateTime = (index: number, field: "starts_at_local" | "scheduled_end_at_local", value: string) => setSchedule((current) => current.map((slot, itemIndex) => itemIndex === index ? { ...slot, [field]: value } : slot));
+  const canModify = schedule.length > 0 && schedule.every((slot) => typeof slot.starts_at_local === "string" && typeof slot.scheduled_end_at_local === "string");
+  return <article className="rounded-xl border p-3"><p className="text-sm font-semibold">Fecha: {String(plan.shift_date)} · Motor: {String(plan.planner)}</p><p className="mt-1 text-xs text-slate-500">Edita fecha y hora local; el servidor vuelve a comprobar turno, descanso, duración y traslapes.</p><div className="mt-3 space-y-3">{schedule.map((slot, index) => <div key={String(slot.employee_id)} className="grid gap-2 rounded-lg bg-stone-50 p-3 dark:bg-slate-800"><span className="text-sm font-medium">{String(members.find((member) => member.user_id === slot.employee_id)?.user_name ?? slot.employee_id)}</span><label className="text-xs">Inicio<input aria-label={`Inicio de comida ${String(slot.employee_id)}`} className={`${inputClass} mt-1`} type="datetime-local" value={String(slot.starts_at_local ?? "")} onChange={(event) => updateTime(index, "starts_at_local", event.target.value)} /></label><label className="text-xs">Fin<input aria-label={`Fin de comida ${String(slot.employee_id)}`} className={`${inputClass} mt-1`} type="datetime-local" value={String(slot.scheduled_end_at_local ?? "")} onChange={(event) => updateTime(index, "scheduled_end_at_local", event.target.value)} /></label></div>)}</div><div className="mt-3 flex flex-wrap gap-2"><button className={primaryClass} disabled={busy} onClick={() => void onDecision("approved", original)}>Aprobar propuesta</button><button className={secondaryClass} disabled={busy || !canModify} onClick={() => void onDecision("modified", schedule)}>Guardar horario modificado</button><button className={secondaryClass} disabled={busy} onClick={() => void onDecision("rejected")}>Rechazar</button></div></article>;
+}
+
+function ManagerReportCard({ report, branchId, responsibleName, recorderName, busy, run }: { report: Row; branchId: string; responsibleName: string; recorderName: string; busy: boolean; run: (action: string, extra?: Record<string, unknown>) => Promise<boolean> }) {
+  const [evidenceUrl, setEvidenceUrl] = useState<string | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const openEvidence = async () => {
+    setEvidenceError(null);
+    try {
+      const result = await sendAction<{ signed_url: string }>({ action: "get_task_report_evidence", branch_id: branchId, report_id: report.id });
+      setEvidenceUrl(result.signed_url);
+    } catch (cause) {
+      setEvidenceError(cause instanceof Error ? cause.message : "No se pudo abrir la evidencia.");
+    }
+  };
+  return <article className="rounded-xl border p-3"><p className="text-sm font-semibold">Actividad {String(report.task_id)}</p><p className="mt-1 text-xs text-slate-500">Responsable: {responsibleName} · Registró: {recorderName}</p><p className="mt-1 text-xs text-slate-500">Realización declarada: {String(report.declared_completed_at)} · Registro efectivo: {String(report.recorded_at)}</p>{typeof report.evidence_path === "string" && <div className="mt-2">{evidenceUrl ? <a className="text-sm font-semibold text-amber-700 underline" href={evidenceUrl} target="_blank" rel="noreferrer">Abrir evidencia (enlace temporal)</a> : <button className="rounded-lg border px-3 py-2 text-xs font-semibold" onClick={() => void openEvidence()}>Cargar evidencia privada</button>}{evidenceError && <p role="alert" className="mt-1 text-xs text-rose-700">{evidenceError}</p>}</div>}<div className="mt-3 flex gap-2"><button className={primaryClass} disabled={busy} onClick={() => void run("review_task_report", { report_id: report.id, decision: "accepted" })}>Validar</button><button className={secondaryClass} disabled={busy} onClick={() => void run("review_task_report", { report_id: report.id, decision: "rejected" })}>Rechazar</button></div></article>;
+}
+
 function Metric({ label, value, icon }: { label: string; value: number; icon: React.ReactNode }) {
   return <div className="rounded-xl border border-stone-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900"><div className="flex items-center justify-between text-slate-500"><span className="text-sm">{label}</span>{icon}</div><p className="mt-2 text-3xl font-bold tabular-nums">{value}</p></div>;
 }
 
-function TaskRow({ task }: { task: Task }) {
+function TaskRow({ task, receipt, canManage = false, onRequestNotice, busy = false }: {
+  task: Task;
+  receipt?: Row;
+  canManage?: boolean;
+  onRequestNotice?: () => void;
+  busy?: boolean;
+}) {
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const parts = task.parts ?? [];
-  return <article className="py-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">{task.name}</h3><p className="mt-1 text-sm text-slate-500">{[task.area_name, `${task.estimated_minutes ?? 0} min`, statusLabels[task.status] ?? task.status].filter(Boolean).join(" · ")}</p>{task.status === "paused" && task.latest_pause_note && <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">Motivo de pausa: {task.latest_pause_note}</p>}</div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${task.status === "completed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>{task.configuration_pending ? "Config. pendiente" : task.assignee_name ?? (task.assigned_to ? "Asignada" : "Sin responsable")}</span></div>{parts.map((part) => <div key={String(part.id)} className="mt-2 rounded-lg bg-stone-50 px-3 py-2 text-sm dark:bg-slate-800"><p>{String(part.zone_name ?? "Zona")} · {String(part.assignee_name ?? "Sin responsable")} · {statusLabels[String(part.status)] ?? String(part.status)}</p>{part.status === "paused" && typeof part.latest_pause_note === "string" && <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">Motivo de pausa: {part.latest_pause_note}</p>}</div>)}</article>;
+  const escalationConfigured = receipt?.escalation_threshold_seconds != null;
+  const assignedAt = Date.parse(String(receipt?.assignment_recorded_at ?? ""));
+  const dueAt = escalationConfigured && Number.isFinite(assignedAt)
+    ? assignedAt + Number(receipt?.escalation_threshold_seconds) * 1000 : null;
+  useEffect(() => {
+    if (receipt?.receipt_state !== "awaiting" || dueAt === null || dueAt <= clockNow) return;
+    const timer = window.setTimeout(() => setClockNow(Date.now()), dueAt - clockNow);
+    return () => window.clearTimeout(timer);
+  }, [clockNow, dueAt, receipt?.receipt_state]);
+  const escalationDue = receipt?.needs_escalation === true || (dueAt !== null && dueAt <= clockNow);
+  const remainingSeconds = dueAt === null ? Number.NaN : Math.max(0, Math.ceil((dueAt - clockNow) / 1000));
+  return <article className="py-4">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">{task.name}</h3><p className="mt-1 text-sm text-slate-500">{[task.area_name, `${task.estimated_minutes ?? 0} min`, statusLabels[task.status] ?? task.status].filter(Boolean).join(" · ")}</p>{task.status === "paused" && task.latest_pause_note && <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">Motivo de pausa: {task.latest_pause_note}</p>}</div><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${task.status === "completed" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>{task.configuration_pending ? "Config. pendiente" : task.assignee_name ?? (task.assigned_to ? "Asignada" : "Sin responsable")}</span></div>
+    {parts.map((part) => <div key={String(part.id)} className="mt-2 rounded-lg bg-stone-50 px-3 py-2 text-sm dark:bg-slate-800"><p>{String(part.zone_name ?? "Zona")} · {String(part.assignee_name ?? "Sin responsable")} · {statusLabels[String(part.status)] ?? String(part.status)}</p>{part.status === "paused" && typeof part.latest_pause_note === "string" && <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">Motivo de pausa: {part.latest_pause_note}</p>}</div>)}
+    {receipt?.receipt_state === "awaiting" && canManage && <div className="mt-3 flex flex-wrap items-center gap-2"><span className="text-xs text-slate-500">Recepción aún no confirmada{escalationConfigured && !escalationDue && Number.isFinite(remainingSeconds) ? ` · aviso automático según política en ${remainingSeconds}s` : escalationDue ? " · plazo de recepción vencido" : ""}.</span>{onRequestNotice && <button className={secondaryClass} disabled={busy} onClick={onRequestNotice}>Solicitar aviso manual</button>}</div>}
+  </article>;
 }
 
 function IncidentRow({ item, members, canManage, onUpdate, busy }: { item: Row; members: Row[]; canManage: boolean; onUpdate: (status: string, assignee: string, isBlocking: boolean) => void; busy: boolean }) {

@@ -9,7 +9,7 @@ import { preferredRestaurantBranchId, rememberRestaurantBranchId } from "@/lib/r
 import { getSupabase } from "@/lib/supabase";
 
 type Row = Record<string, unknown>;
-type Branch = { id: string; name: string; timezone: string; access_role: string; enable_time_clock?: boolean; require_gps_for_time_clock?: boolean; assignment_load_balance_weight?: number; assignment_heavy_rotation_weight?: number; assignment_priority_weight?: number };
+type Branch = { id: string; name: string; timezone: string; access_role: string; enable_time_clock?: boolean; require_gps_for_time_clock?: boolean; meal_duration_minutes?: number | null; collaboration_reservation_seconds?: number | null; receipt_escalation_seconds_by_priority?: Record<string, number>; collaboration_manager_escalation_seconds?: number | null; minimum_area_coverage?: Record<string, number>; assignment_load_balance_weight?: number; assignment_heavy_rotation_weight?: number; assignment_priority_weight?: number };
 type Settings = {
   branch: Branch; areas: Row[]; positions: Row[]; members: Row[]; employees_available_to_add: Row[];
   users?: Row[]; templates: Row[]; templatePositions: Row[]; zones: Row[]; shifts: Row[]; breaks: Row[];
@@ -187,9 +187,9 @@ export default function RestaurantConfigurationPage() {
 
 function AreasPanel({ settings, busy, onSave }: { settings: Settings; busy: boolean; onSave: (action: string, values: Record<string, unknown>) => Promise<void> }) {
   const [areaId, setAreaId] = useState(""); const [area, setArea] = useState("");
-  const [positionId, setPositionId] = useState(""); const [position, setPosition] = useState("");
+  const [positionId, setPositionId] = useState(""); const [position, setPosition] = useState(""); const [positionAreaId, setPositionAreaId] = useState("");
   const selectArea = (item: Row) => { setAreaId(String(item.id)); setArea(String(item.name)); };
-  const selectPosition = (item: Row) => { setPositionId(String(item.id)); setPosition(String(item.name)); };
+  const selectPosition = (item: Row) => { setPositionId(String(item.id)); setPosition(String(item.name)); setPositionAreaId(String(item.area_id ?? "")); };
   return <div className="grid gap-5 xl:grid-cols-2">
     <section className={panelClass}>
       <h2 className="text-lg font-semibold">Áreas físicas</h2><p className="mt-1 text-sm text-slate-500">Referencias del material compartido; la sucursal puede ajustar nombres.</p>
@@ -199,7 +199,7 @@ function AreasPanel({ settings, busy, onSave }: { settings: Settings; busy: bool
     <section className={panelClass}>
       <h2 className="text-lg font-semibold">Puestos laborales</h2><p className="mt-1 text-sm text-slate-500">Describen elegibilidad operativa, no permisos administrativos.</p>
       <div className="mt-4 space-y-2">{settings.positions.map((item) => <button key={String(item.id)} aria-pressed={positionId === item.id} onClick={() => selectPosition(item)} className={`w-full rounded-lg px-3 py-2 text-left text-sm ${positionId === item.id ? "bg-amber-50 dark:bg-amber-950/30" : "bg-stone-50 dark:bg-slate-800"}`}>{String(item.name)}</button>)}</div>
-      <div className="mt-4 flex gap-2"><input aria-label="Nombre del puesto" className={inputClass} value={position} onChange={(event) => setPosition(event.target.value)} placeholder="Nombre del puesto" /><button className={buttonClass} disabled={busy || position.trim().length < 2} onClick={() => void onSave("save_position", { ...(positionId ? { id: positionId } : {}), name: position.trim() }).then(() => { setPosition(""); setPositionId(""); })}>{positionId ? <Save size={16} /> : <Plus size={16} />}{positionId ? "Guardar" : "Agregar"}</button></div>
+      <div className="mt-4 grid gap-2"><input aria-label="Nombre del puesto" className={inputClass} value={position} onChange={(event) => setPosition(event.target.value)} placeholder="Nombre del puesto" /><label className="text-sm">Área que cubre<select aria-label="Área que cubre el puesto" className={inputClass} value={positionAreaId} onChange={(event) => setPositionAreaId(event.target.value)}><option value="">Sin área asignada</option>{settings.areas.map((item) => <option key={String(item.id)} value={String(item.id)}>{String(item.name)}</option>)}</select><span className="mt-1 block text-xs text-slate-500">La cobertura del optimizador solo considera relaciones configuradas aquí.</span></label><button className={buttonClass} disabled={busy || position.trim().length < 2} onClick={() => void onSave("save_position", { ...(positionId ? { id: positionId } : {}), name: position.trim(), area_id: positionAreaId || null }).then(() => { setPosition(""); setPositionId(""); setPositionAreaId(""); })}>{positionId ? <Save size={16} /> : <Plus size={16} />}{positionId ? "Guardar" : "Agregar"}</button></div>
     </section>
   </div>;
 }
@@ -595,6 +595,7 @@ function InspectionsPanel({ settings, busy, onSave }: { settings: Settings; busy
 
 function AssignmentPolicyPanel({ settings, busy, onSave }: { settings: Settings; busy: boolean; onSave: (action: string, values: Record<string, unknown>) => Promise<void> }) {
   const branch = settings.branch;
+  const [coverage, setCoverage] = useState<Record<string, string>>(Object.fromEntries(Object.entries(branch.minimum_area_coverage ?? {}).map(([id, value]) => [id, String(value)])));
   const [weights, setWeights] = useState({
     loadBalance: String(branch.assignment_load_balance_weight ?? 100),
     heavyRotation: String(branch.assignment_heavy_rotation_weight ?? 60),
@@ -605,6 +606,7 @@ function AssignmentPolicyPanel({ settings, busy, onSave }: { settings: Settings;
     heavyRotation: String(branch.assignment_heavy_rotation_weight ?? 60),
     priority: String(branch.assignment_priority_weight ?? 100),
   }), [branch.assignment_load_balance_weight, branch.assignment_heavy_rotation_weight, branch.assignment_priority_weight]);
+  useEffect(() => setCoverage(Object.fromEntries(Object.entries(branch.minimum_area_coverage ?? {}).map(([id, value]) => [id, String(value)]))), [branch.minimum_area_coverage]);
 
   const values = Object.values(weights).map(Number);
   const valid = values.every((value) => Number.isInteger(value) && value >= 0 && value <= 1000);
@@ -631,6 +633,7 @@ function AssignmentPolicyPanel({ settings, busy, onSave }: { settings: Settings;
       assignment_heavy_rotation_weight: Number(weights.heavyRotation),
       assignment_priority_weight: Number(weights.priority),
     })}><Save size={16} />Guardar reglas</button>
+    <fieldset className="mt-8 border-t border-stone-200 pt-5 dark:border-slate-700"><legend className="text-base font-semibold">Cobertura programada mínima por área</legend><p className="mt-1 max-w-3xl text-sm text-slate-500">Se calcula con turnos publicados y personal con un solo puesto vinculado explícitamente al área. Es cobertura calificada programada, no ubicación física. Sin configuración, no se genera recomendación.</p><div className="mt-4 grid gap-3 sm:grid-cols-2">{settings.areas.filter((area) => area.is_active !== false).map((area) => <label key={String(area.id)} className="text-sm">{String(area.name)}<input aria-label={`Cobertura mínima: ${String(area.name)}`} className={`${inputClass} mt-1`} type="number" min={0} max={100} step={1} placeholder="Sin mínimo" value={coverage[String(area.id)] ?? ""} onChange={(event) => setCoverage((current) => ({ ...current, [String(area.id)]: event.target.value }))} /></label>)}</div><button type="button" className={`${buttonClass} mt-4`} disabled={busy || Object.values(coverage).some((value) => value !== "" && (!Number.isInteger(Number(value)) || Number(value) < 0 || Number(value) > 100))} onClick={() => void onSave("save_branch_features", { minimum_area_coverage: Object.fromEntries(Object.entries(coverage).filter(([, value]) => value !== "").map(([id, value]) => [id, Number(value)])) })}><Save size={16} />Guardar cobertura</button></fieldset>
   </section>;
 }
 
@@ -638,12 +641,50 @@ function FeaturesPanel({ settings, busy, onSave }: { settings: Settings; busy: b
   const [branchName, setBranchName] = useState(settings.branch.name);
   const [clockEnabled, setClockEnabled] = useState(settings.branch.enable_time_clock === true);
   const [gpsRequired, setGpsRequired] = useState(settings.branch.require_gps_for_time_clock === true);
+  const [mealDuration, setMealDuration] = useState(settings.branch.meal_duration_minutes == null ? "" : String(settings.branch.meal_duration_minutes));
+  const [reservationSeconds, setReservationSeconds] = useState(settings.branch.collaboration_reservation_seconds == null ? "" : String(settings.branch.collaboration_reservation_seconds));
+  const [managerEscalationSeconds, setManagerEscalationSeconds] = useState(settings.branch.collaboration_manager_escalation_seconds == null ? "" : String(settings.branch.collaboration_manager_escalation_seconds));
+  const [receiptEscalation, setReceiptEscalation] = useState<Record<string, string>>(() => Object.fromEntries(
+    [1, 2, 3, 4, 5].map((priority) => [String(priority), settings.branch.receipt_escalation_seconds_by_priority?.[String(priority)] == null ? "" : String(settings.branch.receipt_escalation_seconds_by_priority[String(priority)])]),
+  ));
   const [timezone, setTimezone] = useState(settings.branch.timezone);
   useEffect(() => {
     setBranchName(settings.branch.name);
     setClockEnabled(settings.branch.enable_time_clock === true);
     setGpsRequired(settings.branch.require_gps_for_time_clock === true);
+    setMealDuration(settings.branch.meal_duration_minutes == null ? "" : String(settings.branch.meal_duration_minutes));
+    setReservationSeconds(settings.branch.collaboration_reservation_seconds == null ? "" : String(settings.branch.collaboration_reservation_seconds));
+    setManagerEscalationSeconds(settings.branch.collaboration_manager_escalation_seconds == null ? "" : String(settings.branch.collaboration_manager_escalation_seconds));
+    setReceiptEscalation(Object.fromEntries([1, 2, 3, 4, 5].map((priority) => [String(priority), settings.branch.receipt_escalation_seconds_by_priority?.[String(priority)] == null ? "" : String(settings.branch.receipt_escalation_seconds_by_priority[String(priority)])])));
     setTimezone(settings.branch.timezone);
-  }, [settings.branch.name, settings.branch.enable_time_clock, settings.branch.require_gps_for_time_clock, settings.branch.timezone]);
-  return <section className={`${panelClass} max-w-3xl`}><h2 className="text-lg font-semibold">Sucursal, asistencia y ubicación</h2><label className="mt-5 block text-sm font-medium">Nombre de sucursal<input className={`${inputClass} mt-1`} value={branchName} onChange={(event) => setBranchName(event.target.value)} maxLength={120} /></label><p className="mt-5 text-sm text-slate-500">La zona horaria define el día operativo y la lectura de horarios. Cambiarla puede cambiar la fecha local de eventos existentes.</p><label className="mt-2 block text-sm font-medium">Zona horaria<select className={`${inputClass} mt-1`} value={timezone} onChange={(event) => setTimezone(event.target.value)}>{mexicoTimeZones.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><p className="mt-2 text-xs text-slate-500">Zona actual: {settings.branch.timezone}</p><p className="mt-6 text-sm text-slate-500">Estas funciones son opcionales e independientes del trabajo operativo. Checador apagado por defecto; GPS también apagado por defecto.</p><label className="mt-3 flex items-start gap-3 rounded-xl border border-stone-200 p-4 dark:border-slate-700"><input className="mt-1" type="checkbox" checked={clockEnabled} onChange={(event) => { setClockEnabled(event.target.checked); if (!event.target.checked) setGpsRequired(false); }} /><span><span className="block font-semibold">Habilitar checador de entrada y salida</span><span className="mt-1 block text-sm text-slate-500">Muestra la pestaña Checador en la app. Guarda asistencia operativa; no calcula nómina.</span></span></label><label className={`mt-3 flex items-start gap-3 rounded-xl border border-stone-200 p-4 dark:border-slate-700 ${clockEnabled ? "" : "opacity-50"}`}><input className="mt-1" type="checkbox" checked={gpsRequired} disabled={!clockEnabled} onChange={(event) => setGpsRequired(event.target.checked)} /><span><span className="block font-semibold">Solicitar GPS al marcar entrada y salida</span><span className="mt-1 block text-sm text-slate-500">Pide ubicación al momento del registro. No usa GPS en segundo plano ni conserva trayectorias.</span></span></label><button className={`${buttonClass} mt-5`} disabled={busy || branchName.trim().length < 2 || !timezone} onClick={() => void onSave("save_branch_features", { name: branchName.trim(), timezone, enable_time_clock: clockEnabled, require_gps_for_time_clock: clockEnabled && gpsRequired })}><Save size={16} /> Guardar sucursal</button></section>;
+  }, [settings.branch.name, settings.branch.enable_time_clock, settings.branch.require_gps_for_time_clock, settings.branch.meal_duration_minutes, settings.branch.collaboration_reservation_seconds, settings.branch.receipt_escalation_seconds_by_priority, settings.branch.collaboration_manager_escalation_seconds, settings.branch.timezone]);
+  const validMealDuration = mealDuration === "" || (Number.isInteger(Number(mealDuration)) && Number(mealDuration) >= 1 && Number(mealDuration) <= 240);
+  const validReservation = reservationSeconds === "" || (Number.isInteger(Number(reservationSeconds)) && Number(reservationSeconds) >= 30 && Number(reservationSeconds) <= 3600);
+  const validEscalation = Object.values(receiptEscalation).every((value) => value === "" || (Number.isInteger(Number(value)) && Number(value) >= 30 && Number(value) <= 86400));
+  const validManagerEscalation = managerEscalationSeconds === "" || (Number.isInteger(Number(managerEscalationSeconds)) && Number(managerEscalationSeconds) >= 30 && Number(managerEscalationSeconds) <= 604800);
+  return <section className={`${panelClass} max-w-3xl`}>
+    <h2 className="text-lg font-semibold">Sucursal, asistencia y operación</h2>
+    <label className="mt-5 block text-sm font-medium">Nombre de sucursal<input className={`${inputClass} mt-1`} value={branchName} onChange={(event) => setBranchName(event.target.value)} maxLength={120} /></label>
+    <p className="mt-5 text-sm text-slate-500">La zona horaria define el día operativo y la lectura de horarios. Cambiarla puede cambiar la fecha local de eventos existentes.</p>
+    <label className="mt-2 block text-sm font-medium">Zona horaria<select className={`${inputClass} mt-1`} value={timezone} onChange={(event) => setTimezone(event.target.value)}>{mexicoTimeZones.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+    <p className="mt-2 text-xs text-slate-500">Zona actual: {settings.branch.timezone}</p>
+    <label className="mt-5 block text-sm font-medium">Duración autorizada de comida (minutos)<input className={`${inputClass} mt-1`} type="number" min={1} max={240} step={1} value={mealDuration} onChange={(event) => setMealDuration(event.target.value)} placeholder="Sin configurar" /></label>
+    <p className="mt-1 text-xs text-slate-500">Déjala vacía hasta definir la política de esta sucursal. El sistema no asume 30 minutos ni activa horarios automáticamente.</p>
+    <label className="mt-4 block text-sm font-medium">Reserva de avisos colaborativos (segundos)<input className={`${inputClass} mt-1`} type="number" min={30} max={3600} step={1} value={reservationSeconds} onChange={(event) => setReservationSeconds(event.target.value)} placeholder="Sin configurar" /></label>
+    <p className="mt-1 text-xs text-slate-500">Sin un plazo configurado, el equipo no puede reservar avisos; no se aplica un valor de ejemplo automáticamente.</p>
+    <fieldset className="mt-5 rounded-xl border border-stone-200 p-4 dark:border-slate-700"><legend className="px-1 text-sm font-semibold">Plazo para escalar tareas sin recepción confirmada</legend><p className="mb-3 text-xs text-slate-500">Configura por prioridad (1–5). Vacío significa que no hay plazo automático; gerencia conserva la opción de solicitar el aviso manualmente. Rango: 30 segundos a 24 horas.</p><div className="grid gap-3 sm:grid-cols-2">{[1, 2, 3, 4, 5].map((priority) => <label key={priority} className="text-sm">Prioridad {priority}<input aria-label={`Plazo de escalamiento prioridad ${priority}`} className={`${inputClass} mt-1`} type="number" min={30} max={86400} step={1} value={receiptEscalation[String(priority)] ?? ""} onChange={(event) => setReceiptEscalation((current) => ({ ...current, [String(priority)]: event.target.value }))} placeholder="Sin plazo" /></label>)}</div></fieldset>
+    <label className="mt-4 block text-sm font-medium">Escalar a gerencia si nadie atiende el aviso (segundos)<input aria-label="Plazo de escalamiento a gerencia" className={`${inputClass} mt-1`} type="number" min={30} max={604800} step={1} value={managerEscalationSeconds} onChange={(event) => setManagerEscalationSeconds(event.target.value)} placeholder="Sin escalamiento automático" /></label>
+    <p className="mt-1 text-xs text-slate-500">Se mide desde la creación del aviso. Si no se configura, el sistema no inventa un plazo ni envía una escalación automática.</p>
+    <p className="mt-6 text-sm text-slate-500">Estas funciones son opcionales e independientes del trabajo operativo. Checador apagado por defecto; GPS también apagado por defecto.</p>
+    <label className="mt-3 flex items-start gap-3 rounded-xl border border-stone-200 p-4 dark:border-slate-700"><input className="mt-1" type="checkbox" checked={clockEnabled} onChange={(event) => { setClockEnabled(event.target.checked); if (!event.target.checked) setGpsRequired(false); }} /><span><span className="block font-semibold">Habilitar checador de entrada y salida</span><span className="mt-1 block text-sm text-slate-500">Muestra la pestaña Checador en la app. Guarda asistencia operativa; no calcula nómina.</span></span></label>
+    <label className={`mt-3 flex items-start gap-3 rounded-xl border border-stone-200 p-4 dark:border-slate-700 ${clockEnabled ? "" : "opacity-50"}`}><input className="mt-1" type="checkbox" checked={gpsRequired} disabled={!clockEnabled} onChange={(event) => setGpsRequired(event.target.checked)} /><span><span className="block font-semibold">Solicitar GPS al marcar entrada y salida</span><span className="mt-1 block text-sm text-slate-500">Pide ubicación al momento del registro. No usa GPS en segundo plano ni conserva trayectorias.</span></span></label>
+    <button className={`${buttonClass} mt-5`} disabled={busy || branchName.trim().length < 2 || !timezone || !validMealDuration || !validReservation || !validEscalation || !validManagerEscalation} onClick={() => void onSave("save_branch_features", {
+      name: branchName.trim(), timezone, enable_time_clock: clockEnabled,
+      require_gps_for_time_clock: clockEnabled && gpsRequired,
+      meal_duration_minutes: mealDuration === "" ? null : Number(mealDuration),
+      collaboration_reservation_seconds: reservationSeconds === "" ? null : Number(reservationSeconds),
+      receipt_escalation_seconds_by_priority: Object.fromEntries(Object.entries(receiptEscalation).filter(([, value]) => value !== "").map(([priority, value]) => [priority, Number(value)])),
+      collaboration_manager_escalation_seconds: managerEscalationSeconds === "" ? null : Number(managerEscalationSeconds),
+    })}><Save size={16} /> Guardar sucursal</button>
+  </section>;
 }

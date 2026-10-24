@@ -12,6 +12,8 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   const [roleLoading, setRoleLoading] = useState(false);
+  const [roleError, setRoleError] = useState<string | null>(null);
+  const [accessCheckRevision, setAccessCheckRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
@@ -86,18 +88,29 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         return;
       }
       setRoleLoading(true);
-      const { data, error } = await getSupabase().rpc("is_platform_admin");
-      if (!active) return;
-      const isAdmin = !error && data === true;
-      setPlatformAdmin(isAdmin);
-      setRoleLoading(false);
-      if (isAdmin && !isPlatformRoute) router.replace("/platform");
-      if (!isAdmin && isPlatformRoute) router.replace("/restaurant");
-      else if (!isAdmin && !isPolloRoute) router.replace("/restaurant");
+      setRoleError(null);
+      try {
+        const { data, error } = await getSupabase().rpc("is_platform_admin");
+        if (error) throw error;
+        if (!active) return;
+        const isAdmin = data === true;
+        setPlatformAdmin(isAdmin);
+        if (isAdmin && !isPlatformRoute) router.replace("/platform");
+        if (!isAdmin && isPlatformRoute) router.replace("/restaurant");
+        else if (!isAdmin && !isPolloRoute) router.replace("/restaurant");
+      } catch {
+        if (!active) return;
+        // A failed role lookup is not evidence that a platform operator is a
+        // tenant user. Keep protected content hidden and let them retry.
+        setPlatformAdmin(false);
+        setRoleError("No se pudieron validar tus permisos. Vuelve a intentarlo; no se abrió ningún panel.");
+      } finally {
+        if (active) setRoleLoading(false);
+      }
     }
     void resolveAccess();
     return () => { active = false; };
-  }, [isCompanyInviteRoute, isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
+  }, [accessCheckRevision, isCompanyInviteRoute, isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -138,6 +151,21 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       <div className="flex min-h-[60vh] items-center justify-center text-slate-500">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-amber-500" />
         <span className="ml-3">{t("common.loading")}</span>
+      </div>
+    );
+  }
+
+  if (session && roleError) {
+    return (
+      <div role="alert" className="mx-auto mt-20 max-w-md rounded-2xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-950">
+        <p>{roleError}</p>
+        <button
+          type="button"
+          onClick={() => setAccessCheckRevision((revision) => revision + 1)}
+          className="mt-4 rounded-lg bg-amber-600 px-4 py-2 font-semibold text-white hover:bg-amber-700"
+        >
+          Reintentar validación
+        </button>
       </div>
     );
   }
