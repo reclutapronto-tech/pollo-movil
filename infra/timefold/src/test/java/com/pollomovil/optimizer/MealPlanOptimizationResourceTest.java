@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import org.junit.jupiter.api.Test;
@@ -44,11 +43,12 @@ class MealPlanOptimizationResourceTest {
         assertEquals(200, response.statusCode(), response.asString());
         assertTrue(response.jsonPath().getBoolean("feasible"));
         assertEquals("timefold", response.jsonPath().getString("planner"));
-        List<Map<String, Integer>> assignments = response.jsonPath().getList("assignments");
+        List<Map<String, Object>> assignments = response.jsonPath().getList("assignments");
         assertEquals(2, assignments.size());
-        assertEquals(2, assignments.stream().map(row -> row.get("employee_id")).collect(Collectors.toSet()).size());
-        List<Integer> starts = assignments.stream().map(row -> row.get("start_minute")).sorted().toList();
+        assertEquals(2, assignments.stream().map(row -> row.get("employee_id")).distinct().count());
+        List<Integer> starts = assignments.stream().map(row -> ((Number) row.get("start_minute")).intValue()).sorted().toList();
         assertTrue(starts.get(1) >= starts.get(0) + 30, "meal periods must not overlap");
-        assertTrue(assignments.stream().allMatch(row -> row.get("start_minute") >= 480 && row.get("end_minute") <= 960));
+        assertTrue(assignments.stream().allMatch(row -> ((Number) row.get("start_minute")).intValue() >= 480
+                && ((Number) row.get("end_minute")).intValue() <= 960));
     }
 }
