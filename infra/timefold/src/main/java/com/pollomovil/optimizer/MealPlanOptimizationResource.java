@@ -76,7 +76,7 @@ public class MealPlanOptimizationResource {
             return Response.serverError().entity(Map.of("error", "Meal optimization could not produce a solution.")).build();
         }
         if (best.getScore() == null || !best.getScore().isFeasible()) {
-            return Response.status(Response.Status.UNPROCESSABLE_ENTITY)
+            return Response.status(422)
                     .entity(Map.of("error", "No meal schedule satisfies all shift, break and coverage-safe constraints.",
                             "score", best.getScore() == null ? "unknown" : best.getScore().toString())).build();
         }
