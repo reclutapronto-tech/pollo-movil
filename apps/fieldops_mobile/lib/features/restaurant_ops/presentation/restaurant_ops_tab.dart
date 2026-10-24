@@ -1189,7 +1189,6 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
   ) {
     final workspace = ref.watch(restaurantOperationalWorkspaceProvider(widget.branchId));
     final notices = ref.watch(restaurantCollaborationInboxProvider(widget.branchId));
-    final localDate = data['local_date'] as String? ?? '';
     final activeMeals = workspace.maybeWhen(
       data: (value) => _maps(value['active_meals']).where((meal) => meal['employee_id'] == userId).toList(growable: false),
       orElse: () => const <Map<String, dynamic>>[],
@@ -1342,20 +1341,19 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
               trailing: OutlinedButton(
                 onPressed: _saving || (!isOnMeal && !canStartPeerMeal) ? null : () => _run(() async {
                   final repository = ref.read(restaurantOpsRepositoryProvider);
-                  if (isOnMeal) {
-                    await repository.confirmMealReturn(
+                  if (activeSessionId != null) {
+                    return repository.confirmMealReturn(
                       branchId: widget.branchId,
-                      sessionId: activeSessionId!,
+                      sessionId: activeSessionId,
                       stateAfterReturn: 'available',
                       declaredAt: _declaredMealAt,
                     );
-                  } else {
-                    await repository.startMeal(
-                      branchId: widget.branchId,
-                      employeeId: employeeId,
-                      declaredAt: _declaredMealAt,
-                    );
                   }
+                  return repository.startMeal(
+                    branchId: widget.branchId,
+                    employeeId: employeeId,
+                    declaredAt: _declaredMealAt,
+                  );
                 }),
                 child: Text(isOnMeal ? 'Confirmar regreso' : 'Iniciar comida'),
               ),
@@ -1412,9 +1410,8 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     ));
   }
 
-  Future<(bool, String?)> _captureTaskEvidence(
-    Map<String, dynamic> task, {String? partId, required bool mandatory},
-  ) async {
+  Future<(bool, String?)> _captureTaskEvidence(Map<String, dynamic> task,
+      {String? partId, required bool mandatory}) async {
     var shouldCapture = mandatory;
     if (!mandatory) {
       shouldCapture = await showDialog<bool>(

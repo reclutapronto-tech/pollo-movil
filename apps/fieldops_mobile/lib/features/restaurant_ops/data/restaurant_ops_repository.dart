@@ -627,7 +627,7 @@ class RestaurantOpsRepository {
     if (parsed == null || !const {'http', 'https'}.contains(parsed.scheme) || parsed.host.isEmpty) {
       throw const FormatException('No se recibió una URL válida para la evidencia.');
     }
-    return url;
+    return url as String;
   }
 
   Future<OpsJson> setOperationalState({
