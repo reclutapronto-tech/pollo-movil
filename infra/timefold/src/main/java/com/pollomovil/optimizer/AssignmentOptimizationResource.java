@@ -16,6 +16,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import ai.timefold.solver.core.api.solver.SolverJob;
 import ai.timefold.solver.core.api.solver.SolverManager;
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
@@ -31,6 +32,7 @@ import jakarta.ws.rs.core.Response;
 public class AssignmentOptimizationResource {
 
     @Inject
+    @Named("assignment")
     SolverManager<AssignmentProblem> solverManager;
 
     @ConfigProperty(name = "pollo.timefold.api-token", defaultValue = "")
