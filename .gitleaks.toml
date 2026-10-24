@@ -16,7 +16,8 @@ paths = [
   '''execution/seed_backend_test_data\.py''',
   '''execution/test_schedule_flow\.py''',
   '''execution/test_rls_validation\.py''',
-  '''\.github/workflows/backend-regression\.yml''',
+  # CocoaPods checksums are package integrity metadata, not credentials.
+  '''apps/fieldops_mobile/(ios|macos)/Podfile\.lock''',
 ]
 regexes = [
   # Supabase local dev anon key (well-known, published in Supabase docs)

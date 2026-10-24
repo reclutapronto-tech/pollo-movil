@@ -1,33 +1,15 @@
-import 'dart:async';
-
 import 'package:fieldops_mobile/core/data/local_database.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Polls the local database every 5 seconds for the count of pending sync
-/// events. The [Timer] is properly cancelled when the provider is disposed,
-/// preventing database polls from continuing after the widget tree is torn down.
+/// Emits the pending sync count as soon as the local outbox changes.
 final pendingEventCountProvider = StreamProvider<int>((ref) {
   final database = ref.watch(localDatabaseProvider);
-  final controller = StreamController<int>();
+  return database.watchPendingCount();
+});
 
-  // Immediately fetch the current count.
-  database.pendingCount().then((count) {
-    if (!controller.isClosed) controller.add(count);
-  });
-
-  final timer = Timer.periodic(const Duration(seconds: 5), (_) async {
-    try {
-      final count = await database.pendingCount();
-      if (!controller.isClosed) controller.add(count);
-    } on Exception catch (e) {
-      if (!controller.isClosed) controller.addError(e);
-    }
-  });
-
-  ref.onDispose(() {
-    timer.cancel();
-    controller.close();
-  });
-
-  return controller.stream;
+/// Failed outbox events remain on-device until a worker or manager retries them.
+/// The payload is deliberately not rendered by the UI because it can contain
+/// location data or operational notes.
+final outboxAttentionEventsProvider = StreamProvider<List<PendingEvent>>((ref) {
+  return ref.watch(localDatabaseProvider).watchOutboxAttentionEvents();
 });

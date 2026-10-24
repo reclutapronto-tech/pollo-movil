@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fieldops_mobile/core/config/fieldops_environment.dart';
+import 'package:fieldops_mobile/core/notifications/notification_service.dart';
 import 'package:fieldops_mobile/features/auth/data/auth_repository_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -45,6 +46,7 @@ class SessionController extends Notifier<SessionState> {
   }
 
   Future<void> signOut() async {
+    await ref.read(notificationServiceProvider).unregisterCurrentDevice();
     await ref.read(authRepositoryProvider).signOut();
     refresh();
   }

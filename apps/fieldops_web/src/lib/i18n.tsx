@@ -49,10 +49,16 @@ const translations: Record<string, TranslationTree> = {
       },
     },
     shell: {
-      appName: "FieldOps AI",
-      commandCenter: "Command Center",
+      appName: "Pollo Móvil",
+      commandCenter: "Restaurant Operations",
       supervisor: "Supervisor",
       dashboard: "Dashboard",
+      restaurantOperations: "Today’s shift",
+      restaurantCalendar: "Task calendar",
+      restaurantCoverage: "Shift coverage",
+      restaurantNotifications: "Notifications",
+      restaurantInspections: "Inspections",
+      restaurantConfig: "Branch setup",
       map: "Live Map",
       workers: "Workers",
       crew: "Crew",
@@ -848,10 +854,16 @@ const translations: Record<string, TranslationTree> = {
       },
     },
     shell: {
-      appName: "FieldOps AI",
-      commandCenter: "Centro de Control",
+      appName: "Pollo Móvil",
+      commandCenter: "Operación del restaurante",
       supervisor: "Supervisor",
       dashboard: "Panel",
+      restaurantOperations: "Turno de hoy",
+      restaurantCalendar: "Calendario de tareas",
+      restaurantCoverage: "Cobertura de turnos",
+      restaurantNotifications: "Notificaciones",
+      restaurantInspections: "Inspecciones",
+      restaurantConfig: "Configuración de sucursal",
       map: "Mapa en Vivo",
       workers: "Trabajadores",
       crew: "Cuadrilla",
@@ -1719,7 +1731,7 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>("en");
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("fieldops-web-locale");
+    const stored = window.localStorage.getItem("pollo-movil-web-locale");
     if (stored === "en" || stored === "es" || stored === "th") {
       setLocaleState(stored);
       document.documentElement.lang = stored;
@@ -1731,7 +1743,7 @@ export function LocaleProvider({ children }: { children: React.ReactNode }) {
       locale,
       setLocale: (nextLocale: Locale) => {
         setLocaleState(nextLocale);
-        window.localStorage.setItem("fieldops-web-locale", nextLocale);
+        window.localStorage.setItem("pollo-movil-web-locale", nextLocale);
         document.documentElement.lang = nextLocale;
       },
       t: (key: string, vars?: Record<string, string | number>) =>

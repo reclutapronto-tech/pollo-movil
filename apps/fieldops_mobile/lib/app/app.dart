@@ -1,7 +1,13 @@
+import 'dart:async';
+
 import 'package:fieldops_mobile/app/main_shell.dart';
 import 'package:fieldops_mobile/app/theme/app_theme.dart';
 import 'package:fieldops_mobile/core/config/fieldops_environment.dart';
+import 'package:fieldops_mobile/core/data/sync_engine.dart';
 import 'package:fieldops_mobile/core/observability/heartbeat_service.dart';
+import 'package:fieldops_mobile/core/notifications/notification_handler.dart';
+import 'package:fieldops_mobile/core/notifications/notification_service.dart';
+import 'package:fieldops_mobile/features/restaurant_ops/data/restaurant_ops_repository.dart';
 import 'package:fieldops_mobile/features/auth/presentation/app_lock_controller.dart';
 import 'package:fieldops_mobile/features/auth/presentation/app_lock_screen.dart';
 import 'package:fieldops_mobile/features/auth/presentation/configuration_required_screen.dart';
@@ -21,10 +27,41 @@ class FieldOpsApp extends ConsumerStatefulWidget {
 
 class _FieldOpsAppState extends ConsumerState<FieldOpsApp>
     with WidgetsBindingObserver {
+  bool _syncStartedForSession = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !ref.read(sessionControllerProvider).isAuthenticated) return;
+      ref.read(appLockControllerProvider.notifier).enable();
+      ref.read(heartbeatServiceProvider).start();
+      _startSyncEngine();
+      unawaited(_initializeNotifications());
+    });
+  }
+
+  void _startSyncEngine() {
+    if (_syncStartedForSession) return;
+    _syncStartedForSession = true;
+    ref.read(syncEngineProvider).start();
+  }
+
+  Future<void> _initializeNotifications() async {
+    final service = ref.read(notificationServiceProvider);
+    try {
+      await service.initialize();
+      if (!mounted || !ref.read(sessionControllerProvider).isAuthenticated) {
+        return;
+      }
+      final handler = ref.read(notificationHandlerProvider);
+      handler.startListening();
+      await handler.handleInitialMessage();
+    } catch (error) {
+      // Push is optional; an unavailable provider must not block operations.
+      debugPrint('[Pollo Móvil] Push initialization unavailable: ${error.runtimeType}');
+    }
   }
 
   @override
@@ -48,6 +85,10 @@ class _FieldOpsAppState extends ConsumerState<FieldOpsApp>
       lockController.recordActivity();
       if (ref.read(sessionControllerProvider).isAuthenticated) {
         heartbeat.start();
+          unawaited(_initializeNotifications());
+        unawaited(ref.read(syncEngineProvider).syncPendingEvents().catchError(
+          (Object error) => debugPrint('[Pollo Móvil] Resume sync failed: $error'),
+        ));
       }
     }
   }
@@ -62,12 +103,24 @@ class _FieldOpsAppState extends ConsumerState<FieldOpsApp>
     ref.listen(sessionControllerProvider, (prev, next) {
       final lockNotifier = ref.read(appLockControllerProvider.notifier);
       final heartbeat = ref.read(heartbeatServiceProvider);
+      final syncEngine = ref.read(syncEngineProvider);
       if (next.isAuthenticated && !(prev?.isAuthenticated ?? false)) {
         lockNotifier.enable();
         heartbeat.start();
+        _startSyncEngine();
+        unawaited(_initializeNotifications());
       } else if (!next.isAuthenticated) {
+        ref.read(notificationHandlerProvider).stopListening();
         lockNotifier.disable();
         heartbeat.stop();
+        syncEngine.stop();
+        _syncStartedForSession = false;
+        ref.invalidate(restaurantBranchesProvider);
+        ref.invalidate(restaurantSelectedBranchProvider);
+        ref.invalidate(activeTabKeyProvider);
+        ref.invalidate(restaurantDashboardProvider);
+        ref.invalidate(restaurantNotificationsProvider);
+        ref.invalidate(restaurantRealtimeProvider);
       }
     });
 
@@ -83,7 +136,8 @@ class _FieldOpsAppState extends ConsumerState<FieldOpsApp>
     }
 
     return MaterialApp(
-      title: 'FieldOps AI',
+      navigatorKey: mainShellNavigatorKey,
+      title: 'Pollo Móvil',
       debugShowCheckedModeBanner: false,
       theme: buildFieldOpsTheme(),
       darkTheme: buildFieldOpsDarkTheme(),

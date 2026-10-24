@@ -1,29 +1,22 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AuthGuard } from "@/components/auth-guard";
-import { Sidebar } from "@/components/sidebar";
-import { CommandPalette } from "@/components/command-palette";
-import { KeyboardShortcutsProvider } from "@/components/keyboard-shortcuts-provider";
+import { AppShell } from "@/components/app-shell";
 import { Providers } from "./providers";
-import { Geist, Manrope } from "next/font/google";
-import { cn } from "@/lib/utils";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
-// Body voice — Geist Sans (neutral, system-grade workhorse).
-const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
-
-// Display voice — Manrope (more refined character at heavier weights;
-// applied to headings + KPI digits via --font-heading in globals.css).
-const manrope = Manrope({
-  subsets: ["latin"],
-  variable: "--font-display",
-  weight: ["500", "600", "700", "800"],
-});
-
 export const metadata: Metadata = {
-  title: "FieldOps AI — Command Center",
-  description:
-    "Monitor field operations, worker activity, and proof timelines.",
+  title: "Pollo Móvil — Operación del restaurante",
+  description: "Coordinación de turnos, actividades, inspecciones e incidencias de restaurante.",
+  manifest: "/site.webmanifest",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+      { url: "/favicon-48x48.png", sizes: "48x48", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export default function RootLayout({
@@ -33,8 +26,8 @@ export default function RootLayout({
 }) {
   return (
     <html
-      lang="en"
-      className={cn("font-sans", geist.variable, manrope.variable)}
+      lang="es-MX"
+      className="font-sans"
       suppressHydrationWarning
     >
       <body
@@ -46,16 +39,7 @@ export default function RootLayout({
             collides with Next.js's metadata system in prod builds. */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <Providers>
-          <AuthGuard>
-            <div className="flex h-screen overflow-hidden">
-              <Sidebar />
-              <main className="flex-1 overflow-y-auto">
-                <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>
-              </main>
-            </div>
-            <CommandPalette />
-            <KeyboardShortcutsProvider />
-          </AuthGuard>
+          <AppShell>{children}</AppShell>
         </Providers>
       </body>
     </html>

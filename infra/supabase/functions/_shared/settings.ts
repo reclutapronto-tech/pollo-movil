@@ -193,7 +193,7 @@ export async function getCompanySettings(
 
   // Deep merge: DB values override defaults, nested objects are preserved
   return deepMerge(
-    structuredClone(DEFAULT_COMPANY_SETTINGS) as Record<string, unknown>,
+    structuredClone(DEFAULT_COMPANY_SETTINGS) as unknown as Record<string, unknown>,
     dbSettings,
-  ) as CompanySettings
+  ) as unknown as CompanySettings
 }

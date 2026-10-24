@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -55,7 +56,86 @@ class LocalDatabase extends _$LocalDatabase {
         await migrator.createTable(pendingMediaUploads);
       }
     },
+    beforeOpen: (_) async {
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS restaurant_snapshots (
+          cache_key TEXT PRIMARY KEY NOT NULL,
+          payload TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      ''');
+      await customStatement('''
+        CREATE TABLE IF NOT EXISTS restaurant_local_preferences (
+          user_id TEXT NOT NULL,
+          preference_key TEXT NOT NULL,
+          preference_value TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (user_id, preference_key)
+        )
+      ''');
+    },
   );
+
+  Future<void> saveRestaurantSnapshot(String key, String payload) async {
+    await customStatement(
+      'INSERT INTO restaurant_snapshots(cache_key, payload, updated_at) '
+      'VALUES (?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET '
+      'payload = excluded.payload, updated_at = excluded.updated_at',
+      [
+        Variable.withString(key),
+        Variable.withString(payload),
+        Variable.withString(DateTime.now().toUtc().toIso8601String()),
+      ],
+    );
+    await customStatement(
+      'DELETE FROM restaurant_snapshots WHERE updated_at < ?',
+      [Variable.withString(
+        DateTime.now().toUtc().subtract(const Duration(days: 90)).toIso8601String(),
+      )],
+    );
+  }
+
+  Future<Map<String, String>?> readRestaurantSnapshot(String key) async {
+    final row = await customSelect(
+      'SELECT payload, updated_at FROM restaurant_snapshots WHERE cache_key = ? LIMIT 1',
+      variables: [Variable.withString(key)],
+    ).getSingleOrNull();
+    if (row == null) return null;
+    return {
+      'payload': row.read<String>('payload'),
+      'updated_at': row.read<String>('updated_at'),
+    };
+  }
+
+  Future<void> saveRestaurantPreference({
+    required String userId,
+    required String key,
+    required String value,
+  }) async {
+    await customStatement(
+      'INSERT INTO restaurant_local_preferences(user_id, preference_key, preference_value, updated_at) '
+      'VALUES (?, ?, ?, ?) ON CONFLICT(user_id, preference_key) DO UPDATE SET '
+      'preference_value = excluded.preference_value, updated_at = excluded.updated_at',
+      [
+        Variable.withString(userId),
+        Variable.withString(key),
+        Variable.withString(value),
+        Variable.withString(DateTime.now().toUtc().toIso8601String()),
+      ],
+    );
+  }
+
+  Future<String?> readRestaurantPreference({
+    required String userId,
+    required String key,
+  }) async {
+    final row = await customSelect(
+      'SELECT preference_value FROM restaurant_local_preferences '
+      'WHERE user_id = ? AND preference_key = ? LIMIT 1',
+      variables: [Variable.withString(userId), Variable.withString(key)],
+    ).getSingleOrNull();
+    return row?.read<String>('preference_value');
+  }
 
   Future<List<PendingEvent>> pendingEventsByAge() {
     return (select(pendingEvents)
@@ -65,9 +145,38 @@ class LocalDatabase extends _$LocalDatabase {
                 e.nextRetryAt.isNull() |
                 e.nextRetryAt.isSmallerOrEqualValue(DateTime.now()),
           )
-          ..orderBy([(e) => OrderingTerm.asc(e.occurredAt)]))
+          ..orderBy([
+            (e) => OrderingTerm.asc(e.occurredAt),
+            (e) => OrderingTerm.asc(e.id),
+          ]))
         .get();
   }
+
+  Stream<List<PendingEvent>> watchOutstandingRestaurantEvents(String branchId) {
+    return (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account']))
+          ..orderBy([
+            (event) => OrderingTerm.asc(event.occurredAt),
+            (event) => OrderingTerm.asc(event.id),
+          ]))
+        .watch();
+  }
+
+  Stream<List<PendingEvent>> watchOutboxAttentionEvents() => (select(pendingEvents)
+        ..where((event) => event.syncStatus.isIn(const ['failed', 'waiting_account']))
+        ..orderBy([(event) => OrderingTerm.asc(event.occurredAt)]))
+      .watch();
+
+  Future<void> resumeWaitingEvents() => (update(pendingEvents)
+        ..where((event) => event.syncStatus.equals('waiting_account')))
+      .write(const PendingEventsCompanion(
+        syncStatus: Value('pending'),
+        nextRetryAt: Value(null),
+        errorMessage: Value(null),
+      ));
 
   Future<int> pendingCount() async {
     final query = selectOnly(pendingEvents)
@@ -76,6 +185,25 @@ class LocalDatabase extends _$LocalDatabase {
     final row = await query.getSingle();
     return row.read(pendingEvents.id.count()) ?? 0;
   }
+
+  Stream<int> watchPendingCount() {
+    final countColumn = pendingEvents.id.count();
+    return (selectOnly(pendingEvents)
+          ..addColumns([countColumn])
+          ..where(pendingEvents.syncStatus.equals('pending')))
+        .watchSingle()
+        .map((row) => row.read(countColumn) ?? 0);
+  }
+
+  Future<void> retryFailedEvent(String eventId) =>
+      (update(pendingEvents)
+            ..where((event) => event.id.equals(eventId) & event.syncStatus.equals('failed')))
+          .write(const PendingEventsCompanion(
+            syncStatus: Value('pending'),
+            retryCount: Value(0),
+            nextRetryAt: Value(null),
+            errorMessage: Value(null),
+          ));
 
   Future<int> pendingMediaUploadCount({String? jobId}) async {
     final query = selectOnly(pendingMediaUploads)
@@ -102,17 +230,6 @@ class LocalDatabase extends _$LocalDatabase {
     return query
         .watchSingle()
         .map((row) => row.read(pendingMediaUploads.id.count()) ?? 0);
-  }
-
-  Future<void> cleanOldFailed({Duration olderThan = const Duration(days: 7)}) {
-    final cutoff = DateTime.now().subtract(olderThan);
-    return (delete(pendingEvents)
-          ..where(
-            (e) =>
-                e.syncStatus.equals('failed') &
-                e.createdAt.isSmallerThanValue(cutoff),
-          ))
-        .go();
   }
 
   Stream<List<PendingMediaUpload>> watchPendingMediaUploadsForJob(
@@ -173,6 +290,220 @@ class LocalDatabase extends _$LocalDatabase {
     );
   }
 
+  Future<bool> hasOutstandingRestaurantEvidence(String objectPath) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account'])))
+        .get();
+    for (final event in events) {
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['action'] == 'upload_evidence' &&
+            payload['object_path'] == objectPath) {
+          return true;
+        }
+      } on FormatException {
+        // The normal outbox handler will surface malformed rows.
+      }
+    }
+    return false;
+  }
+
+  Future<bool> hasOutstandingRestaurantClockEvent({
+    required String branchId,
+    required String actorId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account']))
+          ..orderBy([(event) => OrderingTerm.asc(event.createdAt)])
+        ).get();
+    for (final event in events) {
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['queued_by_user_id'] == actorId &&
+            payload['action'] == 'record_time_event' &&
+            payload['branch_id'] == branchId) {
+          return true;
+        }
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return false;
+  }
+
+  Future<bool> hasEarlierUnresolvedRestaurantClockEvent({
+    required PendingEvent currentEvent,
+    required String branchId,
+    required String actorId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account'])))
+        .get();
+    for (final event in events) {
+      final earlier = event.createdAt.isBefore(currentEvent.createdAt) ||
+          (event.createdAt.isAtSameMomentAs(currentEvent.createdAt) &&
+              event.id.compareTo(currentEvent.id) < 0);
+      if (event.id == currentEvent.id || !earlier) continue;
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['queued_by_user_id'] == actorId &&
+            payload['action'] == 'record_time_event' &&
+            payload['branch_id'] == branchId) {
+          return true;
+        }
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return false;
+  }
+
+  Future<bool> hasEarlierUnresolvedRestaurantShiftCoverRequest({
+    required PendingEvent currentEvent,
+    required String branchId,
+    required String actorId,
+    required String clientEventId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account'])))
+        .get();
+    for (final event in events) {
+      final earlier = event.createdAt.isBefore(currentEvent.createdAt) ||
+          (event.createdAt.isAtSameMomentAs(currentEvent.createdAt) &&
+              event.id.compareTo(currentEvent.id) < 0);
+      if (event.id == currentEvent.id || !earlier) continue;
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['queued_by_user_id'] == actorId &&
+            payload['branch_id'] == branchId &&
+            payload['action'] == 'request_shift_cover' &&
+            payload['client_event_id'] == clientEventId) {
+          return true;
+        }
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return false;
+  }
+
+  Future<bool> hasUnresolvedRestaurantShiftCoverRequest({
+    required String branchId,
+    required String actorId,
+    required String clientEventId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account'])))
+        .get();
+    for (final event in events) {
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['queued_by_user_id'] == actorId &&
+            payload['branch_id'] == branchId &&
+            payload['action'] == 'request_shift_cover' &&
+            payload['client_event_id'] == clientEventId) {
+          return true;
+        }
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return false;
+  }
+
+  Future<bool> hasEarlierUnresolvedRestaurantTaskAction({
+    required PendingEvent currentEvent,
+    required String branchId,
+    required String actorId,
+    required String taskId,
+    required String? partId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account']))
+          ..orderBy([
+            (event) => OrderingTerm.asc(event.occurredAt),
+            (event) => OrderingTerm.asc(event.id),
+          ]))
+        .get();
+    for (final event in events) {
+      final earlier = event.occurredAt.isBefore(currentEvent.occurredAt) ||
+          (event.occurredAt.isAtSameMomentAs(currentEvent.occurredAt) &&
+              event.id.compareTo(currentEvent.id) < 0);
+      if (event.id == currentEvent.id || !earlier) continue;
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is Map<String, dynamic> &&
+            payload['queued_by_user_id'] == actorId &&
+            payload['action'] == 'task_action' &&
+            payload['branch_id'] == branchId &&
+            payload['task_id'] == taskId &&
+            payload['part_id'] == partId) {
+          return true;
+        }
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return false;
+  }
+
+  Future<Map<String, dynamic>?> latestOutstandingRestaurantClockState({
+    required String branchId,
+    required String actorId,
+  }) async {
+    final events = await (select(pendingEvents)
+          ..where((event) =>
+              event.jobId.equals(branchId) &
+              event.eventType.equals('restaurant_ops') &
+              event.syncStatus.isIn(const ['pending', 'failed', 'waiting_account']))
+          ..orderBy([(event) => OrderingTerm.asc(event.createdAt)])
+        ).get();
+    Map<String, dynamic>? latestState;
+    for (final event in events) {
+      try {
+        final payload = jsonDecode(event.payload);
+        if (payload is! Map<String, dynamic> ||
+            payload['queued_by_user_id'] != actorId ||
+            payload['action'] != 'record_time_event' ||
+            payload['branch_id'] != branchId) {
+          continue;
+        }
+        final eventType = payload['event_type'];
+        final occurredAt = payload['occurred_at'];
+        if (!const {'clock_in', 'clock_out'}.contains(eventType) || occurredAt is! String) continue;
+        latestState = {
+          'clocked_in': eventType == 'clock_in',
+          'clock_in_at': eventType == 'clock_in' ? occurredAt : null,
+        };
+      } on FormatException {
+        // Leave malformed events for the normal outbox recovery flow.
+      }
+    }
+    return latestState;
+  }
+
   Future<void> markFailed(String eventId, String error, int retryCount) {
     final backoffSeconds = _exponentialBackoff(retryCount);
     final nextRetry = DateTime.now().add(Duration(seconds: backoffSeconds));
@@ -195,6 +526,15 @@ class LocalDatabase extends _$LocalDatabase {
     );
   }
 
+  Future<void> markWaitingForAccount(String eventId) =>
+      (update(pendingEvents)..where((event) => event.id.equals(eventId))).write(
+        const PendingEventsCompanion(
+          syncStatus: Value('waiting_account'),
+          nextRetryAt: Value(null),
+          errorMessage: Value('Sign in with the account that saved this change.'),
+        ),
+      );
+
   Future<void> cleanSynced() {
     return (delete(
       pendingEvents,
@@ -212,13 +552,12 @@ class LocalDatabase extends _$LocalDatabase {
 LazyDatabase _openConnection() {
   return LazyDatabase(() async {
     final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/fieldops_local.sqlite');
+    final file = File('${dir.path}/pollo_movil_local.sqlite');
 
-    // Retrieve or generate the encryption key. Secure storage can fail on
-    // fresh installs / locked keychains / OEM quirks — fall back to a
-    // session-only key so the DB still opens instead of crashing the app.
+    // Keep a persistent encryption key. Never open the same on-disk database
+    // with a session-only key that would make queued offline records unreadable.
     const storage = FlutterSecureStorage();
-    const keyName = 'fieldops_db_key';
+    const keyName = 'pollo_movil_db_key';
     String dbKey;
     try {
       final existing = await storage.read(key: keyName);
@@ -226,15 +565,12 @@ LazyDatabase _openConnection() {
         dbKey = existing;
       } else {
         dbKey = _generateKey(32);
-        try {
-          await storage.write(key: keyName, value: dbKey);
-        } on Object {
-          // Best-effort persist; proceed with in-memory key.
-        }
+        await storage.write(key: keyName, value: dbKey);
       }
     } on Object {
-      // Keychain unavailable — use a transient key so the app still boots.
-      dbKey = _generateKey(32);
+      throw StateError(
+        'Secure storage is unavailable; offline data cannot be persisted safely.',
+      );
     }
 
     return NativeDatabase.createInBackground(

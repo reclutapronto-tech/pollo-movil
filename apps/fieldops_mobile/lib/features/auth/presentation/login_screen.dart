@@ -101,17 +101,27 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Center(
+                          child: Image.asset(
+                            'assets/branding/pollo-movil.png',
+                            width: 176,
+                            height: 176,
+                            fit: BoxFit.contain,
+                            semanticLabel: 'Logotipo oficial de El Pollo Móvil',
+                          ),
+                        ),
+                        const SizedBox(height: 20),
                         Wrap(
                           spacing: 10,
                           runSpacing: 10,
                           children: [
                             StatusChip(
-                              label: 'Worker login',
+                              label: 'Acceso de equipo',
                               color: palette.signal,
                               textColor: palette.slate,
                             ),
                             StatusChip(
-                              label: 'Proof-first',
+                              label: 'Operación de restaurante',
                               color:
                                   palette.success.withValues(alpha: 0.14),
                               textColor: palette.success,
@@ -120,12 +130,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         ),
                         const SizedBox(height: 24),
                         Text(
-                          'Clock in fast.\nProve the work.\nKeep moving.',
+                          'Coordina el turno.\nResuelve el trabajo.\nHaz el relevo.',
                           style: textTheme.displaySmall,
                         ),
                         const SizedBox(height: 14),
                         Text(
-                          'Secure login, zero clutter, and a straight path into the worker flow.',
+                          'Acceso seguro a las actividades, inspecciones e incidencias de tu sucursal.',
                           style: textTheme.bodyLarge,
                         ),
                         const SizedBox(height: 28),
@@ -135,7 +145,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Semantics(
-                                label: 'Email address input',
+                                    label: 'Campo de correo electrónico',
                                 textField: true,
                                 child: TextFormField(
                                   controller: _emailController,
@@ -144,18 +154,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   autocorrect: false,
                                   textInputAction: TextInputAction.next,
                                   decoration: const InputDecoration(
-                                    labelText: 'Email',
-                                    hintText: 'you@company.com',
+                                    labelText: 'Correo electrónico',
+                                    hintText: 'tu@empresa.com',
                                     prefixIcon:
                                         Icon(Icons.email_outlined),
                                   ),
                                   validator: (value) {
                                     final email = value?.trim() ?? '';
                                     if (email.isEmpty) {
-                                      return 'Email is required.';
+                                      return 'El correo es obligatorio.';
                                     }
                                     if (!email.contains('@')) {
-                                      return 'Enter a valid email address.';
+                                      return 'Escribe un correo válido.';
                                     }
                                     return null;
                                   },
@@ -171,7 +181,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   GestureDetector(
                                     onTap: () => setState(() => _rememberEmail = !_rememberEmail),
                                     child: Text(
-                                      'Remember my email',
+                                      'Recordar mi correo',
                                       style: textTheme.bodySmall,
                                     ),
                                   ),
@@ -187,8 +197,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   textInputAction: TextInputAction.done,
                                   onFieldSubmitted: (_) => _submit(),
                                   decoration: InputDecoration(
-                                    labelText: 'Password',
-                                    hintText: 'Enter your password',
+                                    labelText: 'Contraseña',
+                                    hintText: 'Escribe tu contraseña',
                                     prefixIcon:
                                         const Icon(Icons.lock_outline_rounded),
                                     suffixIcon: IconButton(
@@ -198,8 +208,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                             : Icons.visibility_rounded,
                                       ),
                                       tooltip: _obscurePassword
-                                          ? 'Show password'
-                                          : 'Hide password',
+                                          ? 'Mostrar contraseña'
+                                          : 'Ocultar contraseña',
                                       onPressed: () {
                                         setState(
                                           () => _obscurePassword =
@@ -210,7 +220,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   ),
                                   validator: (value) {
                                     if ((value ?? '').isEmpty) {
-                                      return 'Password is required.';
+                                      return 'La contraseña es obligatoria.';
                                     }
                                     return null;
                                   },
@@ -227,8 +237,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               Semantics(
                                 button: true,
                                 label: isLoading
-                                    ? 'Signing in'
-                                    : 'Sign in to worker app',
+                                    ? 'Iniciando sesión'
+                                    : 'Iniciar sesión en Pollo Móvil',
                                 child: ElevatedButton(
                                   onPressed:
                                       isLoading ? null : _submit,
@@ -242,7 +252,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                           ),
                                         )
                                       : const Text(
-                                          'Sign in to worker app'),
+                                          'Iniciar sesión'),
                                 ),
                               ),
                             ],

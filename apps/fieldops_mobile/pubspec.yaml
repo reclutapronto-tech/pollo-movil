@@ -1,5 +1,5 @@
 name: fieldops_mobile
-description: "Worker mobile app for FieldOps AI."
+description: "Aplicación móvil de coordinación operativa para Pollo Móvil."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -50,22 +50,32 @@ dependencies:
   sqlcipher_flutter_libs: ^0.6.7
   flutter_secure_storage: ^9.2.4
   connectivity_plus: ^6.1.4
-  sentry_flutter: ^8.11.0
+  sentry_flutter: ^9.3.0
   local_auth: ^2.3.0
+  firebase_core: 5.0.0
+  firebase_messaging: 17.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
   flutter_lints: ^5.0.0
   drift_dev: ^2.23.1
   build_runner: ^2.4.14
+  shared_preferences: ^2.5.3
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
 # The following section is specific to Flutter packages.
 flutter:
+  config:
+    enable-swift-package-manager: false
   generate: true
+
+  assets:
+    - assets/branding/pollo-movil.png
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

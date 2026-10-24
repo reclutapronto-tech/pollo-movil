@@ -6,7 +6,7 @@ test.describe('Public gallery viewer (/g/[token])', () => {
   test('shows an error state when the token is invalid', async ({ page }) => {
     await page.goto('/g/00000000-0000-0000-0000-000000000000');
     // "Gallery unavailable" heading appears when the backend returns 404.
-    await expect(page.getByText(/gallery unavailable|no longer active|not found/i))
+    await expect(page.getByRole('heading', { name: /gallery unavailable/i }))
       .toBeVisible({ timeout: 15000 });
   });
 

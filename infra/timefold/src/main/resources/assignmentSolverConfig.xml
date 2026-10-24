@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<solver xmlns="https://timefold.ai/xsd/solver">
+  <solutionClass>com.pollomovil.optimizer.AssignmentProblem</solutionClass>
+  <entityClass>com.pollomovil.optimizer.AssignmentUnit</entityClass>
+  <scoreDirectorFactory>
+    <constraintProviderClass>com.pollomovil.optimizer.AssignmentConstraintProvider</constraintProviderClass>
+  </scoreDirectorFactory>
+  <termination>
+    <spentLimit>PT3S</spentLimit>
+  </termination>
+</solver>

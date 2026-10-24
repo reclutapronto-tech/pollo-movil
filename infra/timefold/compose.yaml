@@ -1,0 +1,24 @@
+name: pollo-movil-timefold
+
+services:
+  timefold:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pollo-movil-timefold
+    restart: unless-stopped
+    environment:
+      QUARKUS_HTTP_HOST: 0.0.0.0
+      TIMEFOLD_SOLVER_TIME_LIMIT: ${TIMEFOLD_SOLVER_TIME_LIMIT:-PT3S}
+      TIMEFOLD_API_TOKEN: ${TIMEFOLD_API_TOKEN:-}
+    ports:
+      - "127.0.0.1:18088:8080"
+    networks:
+      pollo-movil-local:
+        aliases:
+          - timefold
+
+networks:
+  pollo-movil-local:
+    external: true
+    name: pollo-movil-local

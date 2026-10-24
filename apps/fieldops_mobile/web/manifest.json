@@ -1,11 +1,11 @@
 {
-    "name": "fieldops_mobile",
-    "short_name": "fieldops_mobile",
+    "name": "Pollo Móvil",
+    "short_name": "Pollo Móvil",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#7D1DAD",
+    "theme_color": "#7D1DAD",
+    "description": "Aplicación móvil para la operación diaria de sucursales.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

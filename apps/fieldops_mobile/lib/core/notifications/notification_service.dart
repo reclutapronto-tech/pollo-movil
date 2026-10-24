@@ -1,20 +1,12 @@
-// Push notification service.
-//
-// FCM activation requires:
-// 1. Firebase project → `flutterfire configure`
-// 2. Add to pubspec.yaml: firebase_core, firebase_messaging
-// 3. APNs key upload for iOS (Apple Developer portal)
-// 4. Uncomment FirebaseNotificationService below
-// 5. Switch provider in notification_provider.dart
-//
-// This file provides the service interface, a no-op stub for development,
-// and the ready-to-activate Firebase implementation.
-
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// Notification payload from a push message.
 class PushNotification {
   const PushNotification({
     required this.title,
@@ -26,14 +18,10 @@ class PushNotification {
   final String body;
   final Map<String, dynamic> data;
 
-  /// Route to navigate to when tapped, derived from [data].
   String? get route => data['route'] as String?;
-
-  /// Entity ID referenced in the notification (e.g. shift, OT request).
   String? get entityId => data['entity_id'] as String?;
 }
 
-/// Push notification categories the app handles.
 enum NotificationCategory {
   otApproval,
   ptoUpdate,
@@ -42,55 +30,62 @@ enum NotificationCategory {
   safetyAlert,
   expenseApproval,
   timecardReady,
+  taskAssigned,
+  inspectionDue,
+  incidentUpdated,
+  handoffReceived,
   general,
 }
 
-/// Parse a notification category string from push data.
 NotificationCategory parseNotificationCategory(String? value) {
-  switch (value) {
-    case 'ot_approval':
-      return NotificationCategory.otApproval;
-    case 'pto_update':
-      return NotificationCategory.ptoUpdate;
-    case 'schedule_published':
-      return NotificationCategory.schedulePublished;
-    case 'shift_swap_result':
-      return NotificationCategory.shiftSwapResult;
-    case 'safety_alert':
-      return NotificationCategory.safetyAlert;
-    case 'expense_approval':
-      return NotificationCategory.expenseApproval;
-    case 'timecard_ready':
-      return NotificationCategory.timecardReady;
-    default:
-      return NotificationCategory.general;
-  }
+  return switch (value) {
+    'ot_approval' => NotificationCategory.otApproval,
+    'pto_update' => NotificationCategory.ptoUpdate,
+    'schedule_published' || 'shift_published' =>
+      NotificationCategory.schedulePublished,
+    'shift_swap_result' => NotificationCategory.shiftSwapResult,
+    'safety_alert' => NotificationCategory.safetyAlert,
+    'expense_approval' => NotificationCategory.expenseApproval,
+    'timecard_ready' => NotificationCategory.timecardReady,
+    'task_assigned' || 'waste_task_assigned' =>
+      NotificationCategory.taskAssigned,
+    'inspection_due' || 'waste_inspection_due' =>
+      NotificationCategory.inspectionDue,
+    'incident_updated' || 'incident_assigned' =>
+      NotificationCategory.incidentUpdated,
+    'handoff_received' || 'shift_handoff_received' =>
+      NotificationCategory.handoffReceived,
+    _ => NotificationCategory.general,
+  };
 }
 
-/// Notification service interface for push notifications.
-abstract class NotificationService {
-  /// Initialize the notification subsystem (request permissions, etc.).
+abstract interface class NotificationService {
+  bool get isAvailable;
+  Future<bool> get isEnabled;
   Future<void> initialize();
-
-  /// Returns the device push token, or null if unavailable.
+  Future<bool> setEnabled(bool enabled);
   Future<String?> getDeviceToken();
-
-  /// Register the device token with the backend for targeted push.
   Future<void> registerToken(String token);
-
-  /// Stream of notifications received while the app is in the foreground.
+  Future<void> unregisterCurrentDevice();
   Stream<PushNotification> get onForegroundMessage;
-
-  /// Returns the notification that launched the app (if any).
+  Stream<PushNotification> get onNotificationOpened;
   Future<PushNotification?> getInitialMessage();
 }
 
-/// Placeholder until Firebase is configured.
 class NoOpNotificationService implements NotificationService {
   const NoOpNotificationService();
 
   @override
+  bool get isAvailable => false;
+
+  @override
+  Future<bool> get isEnabled async => false;
+
+  @override
   Future<void> initialize() async {}
+
+  @override
+  Future<bool> setEnabled(bool enabled) async => false;
 
   @override
   Future<String?> getDeviceToken() async => null;
@@ -99,110 +94,298 @@ class NoOpNotificationService implements NotificationService {
   Future<void> registerToken(String token) async {}
 
   @override
+  Future<void> unregisterCurrentDevice() async {}
+
+  @override
   Stream<PushNotification> get onForegroundMessage => const Stream.empty();
+
+  @override
+  Stream<PushNotification> get onNotificationOpened => const Stream.empty();
 
   @override
   Future<PushNotification?> getInitialMessage() async => null;
 }
 
-// ---------------------------------------------------------------------------
-// Firebase implementation — activate when Firebase project is configured.
-// ---------------------------------------------------------------------------
-//
-// import 'package:firebase_core/firebase_core.dart';
-// import 'package:firebase_messaging/firebase_messaging.dart';
-//
-// /// Handle background messages (must be top-level function).
-// @pragma('vm:entry-point')
-// Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage msg) async {
-//   await Firebase.initializeApp();
-//   // Background processing (e.g., update badge count, store to local DB).
-// }
-//
-// class FirebaseNotificationService implements NotificationService {
-//   FirebaseNotificationService(this._ref);
-//
-//   final Ref _ref;
-//   final _foregroundController = StreamController<PushNotification>.broadcast();
-//
-//   @override
-//   Future<void> initialize() async {
-//     await Firebase.initializeApp();
-//
-//     FirebaseMessaging.onBackgroundMessage(
-//       _firebaseMessagingBackgroundHandler,
-//     );
-//
-//     // Request permission (iOS / macOS).
-//     final settings = await FirebaseMessaging.instance.requestPermission(
-//       alert: true,
-//       badge: true,
-//       sound: true,
-//       provisional: false,
-//     );
-//
-//     if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-//         settings.authorizationStatus == AuthorizationStatus.provisional) {
-//       // Listen for foreground messages.
-//       FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
-//
-//       // Register token on first launch + token refresh.
-//       final token = await FirebaseMessaging.instance.getToken();
-//       if (token != null) await registerToken(token);
-//
-//       FirebaseMessaging.instance.onTokenRefresh.listen(registerToken);
-//     }
-//   }
-//
-//   void _handleForegroundMessage(RemoteMessage message) {
-//     final notification = PushNotification(
-//       title: message.notification?.title ?? '',
-//       body: message.notification?.body ?? '',
-//       data: message.data,
-//     );
-//     _foregroundController.add(notification);
-//   }
-//
-//   @override
-//   Future<String?> getDeviceToken() async {
-//     return FirebaseMessaging.instance.getToken();
-//   }
-//
-//   @override
-//   Future<void> registerToken(String token) async {
-//     try {
-//       final supabase = Supabase.instance.client;
-//       await supabase.functions.invoke(
-//         'device_tokens',
-//         body: {
-//           'action': 'register',
-//           'token': token,
-//           'platform': Platform.isIOS ? 'ios' : 'android',
-//         },
-//       );
-//     } catch (_) {
-//       // Token registration is best-effort; don't block app launch.
-//     }
-//   }
-//
-//   @override
-//   Stream<PushNotification> get onForegroundMessage =>
-//       _foregroundController.stream;
-//
-//   @override
-//   Future<PushNotification?> getInitialMessage() async {
-//     final msg = await FirebaseMessaging.instance.getInitialMessage();
-//     if (msg == null) return null;
-//     return PushNotification(
-//       title: msg.notification?.title ?? '',
-//       body: msg.notification?.body ?? '',
-//       data: msg.data,
-//     );
-//   }
-// }
+class _FirebaseMobileConfig {
+  const _FirebaseMobileConfig({
+    required this.apiKey,
+    required this.projectId,
+    required this.messagingSenderId,
+    required this.androidAppId,
+    required this.iosAppId,
+    required this.iosBundleId,
+  });
 
-/// Riverpod provider — swap [NoOpNotificationService] for
-/// [FirebaseNotificationService] once Firebase is configured.
+  factory _FirebaseMobileConfig.fromDartDefines() => const _FirebaseMobileConfig(
+        apiKey: String.fromEnvironment('FIREBASE_API_KEY'),
+        projectId: String.fromEnvironment('FIREBASE_PROJECT_ID'),
+        messagingSenderId: String.fromEnvironment('FIREBASE_MESSAGING_SENDER_ID'),
+        androidAppId: String.fromEnvironment('FIREBASE_ANDROID_APP_ID'),
+        iosAppId: String.fromEnvironment('FIREBASE_IOS_APP_ID'),
+        iosBundleId: String.fromEnvironment('FIREBASE_IOS_BUNDLE_ID'),
+      );
+
+  final String apiKey;
+  final String projectId;
+  final String messagingSenderId;
+  final String androidAppId;
+  final String iosAppId;
+  final String iosBundleId;
+
+  bool supports(TargetPlatform platform) {
+    if (kIsWeb || apiKey.isEmpty || projectId.isEmpty || messagingSenderId.isEmpty) {
+      return false;
+    }
+    return switch (platform) {
+      TargetPlatform.android => androidAppId.isNotEmpty,
+      TargetPlatform.iOS => iosAppId.isNotEmpty,
+      _ => false,
+    };
+  }
+
+  FirebaseOptions optionsFor(TargetPlatform platform) => FirebaseOptions(
+        apiKey: apiKey,
+        appId: platform == TargetPlatform.iOS ? iosAppId : androidAppId,
+        messagingSenderId: messagingSenderId,
+        projectId: projectId,
+        iosBundleId: platform == TargetPlatform.iOS && iosBundleId.isNotEmpty
+            ? iosBundleId
+            : null,
+      );
+}
+
+class FirebaseNotificationService implements NotificationService {
+  FirebaseNotificationService()
+      : _config = _FirebaseMobileConfig.fromDartDefines();
+
+  static const _enabledKey = 'pollo_movil.push_notifications_enabled';
+  static const _secureStorage = FlutterSecureStorage();
+
+  final _FirebaseMobileConfig _config;
+  final _foregroundController =
+      StreamController<PushNotification>.broadcast();
+  final _openedController = StreamController<PushNotification>.broadcast();
+  StreamSubscription<RemoteMessage>? _foregroundSubscription;
+  StreamSubscription<RemoteMessage>? _openedSubscription;
+  StreamSubscription<String>? _tokenSubscription;
+  Future<void>? _initializing;
+  bool _initialized = false;
+
+  @override
+  bool get isAvailable => _config.supports(defaultTargetPlatform);
+
+  @override
+  Future<bool> get isEnabled async {
+    if (!isAvailable) return false;
+    return await _secureStorage.read(key: _enabledKey) == 'true';
+  }
+
+  @override
+  Future<void> initialize() async {
+    if (!isAvailable) return;
+    if (_initialized) {
+      final enabled = await isEnabled;
+      await FirebaseMessaging.instance.setAutoInitEnabled(enabled);
+      if (enabled) await _registerAuthorizedDeviceToken();
+      return;
+    }
+    final pending = _initializing;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+
+    final initialization = _initializeFirebase();
+    _initializing = initialization;
+    try {
+      await initialization;
+    } finally {
+      _initializing = null;
+    }
+  }
+
+  Future<void> _initializeFirebase() async {
+    final platform = defaultTargetPlatform;
+    if (Firebase.apps.isEmpty) {
+      await Firebase.initializeApp(options: _config.optionsFor(platform));
+    }
+    final messaging = FirebaseMessaging.instance;
+    await messaging.setAutoInitEnabled(await isEnabled);
+    await messaging.setForegroundNotificationPresentationOptions(
+      alert: false,
+      badge: false,
+      sound: false,
+    );
+    _foregroundSubscription = FirebaseMessaging.onMessage.listen((message) {
+      _foregroundController.add(_fromRemoteMessage(message));
+    });
+    _openedSubscription = FirebaseMessaging.onMessageOpenedApp.listen((message) {
+      _openedController.add(_fromRemoteMessage(message));
+    });
+    _tokenSubscription = messaging.onTokenRefresh.listen((token) async {
+      if (await isEnabled) await registerToken(token);
+    });
+    _initialized = true;
+
+    if (await isEnabled) await _registerAuthorizedDeviceToken();
+  }
+
+  @override
+  Future<bool> setEnabled(bool enabled) async {
+    if (!isAvailable) return false;
+    await initialize();
+
+    if (!enabled) {
+      await unregisterCurrentDevice();
+      await _secureStorage.write(key: _enabledKey, value: 'false');
+      return true;
+    }
+
+    final settings = await FirebaseMessaging.instance.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      provisional: false,
+    );
+    final permitted = settings.authorizationStatus == AuthorizationStatus.authorized ||
+        settings.authorizationStatus == AuthorizationStatus.provisional;
+    if (!permitted) {
+      await _secureStorage.write(key: _enabledKey, value: 'false');
+      return false;
+    }
+
+    await _secureStorage.write(key: _enabledKey, value: 'true');
+    await FirebaseMessaging.instance.setAutoInitEnabled(true);
+    await _registerAuthorizedDeviceToken();
+    return true;
+  }
+
+  Future<void> _registerAuthorizedDeviceToken() async {
+    final messaging = FirebaseMessaging.instance;
+    final settings = await messaging.getNotificationSettings();
+    final permitted = settings.authorizationStatus == AuthorizationStatus.authorized ||
+        settings.authorizationStatus == AuthorizationStatus.provisional;
+    if (!await isEnabled) return;
+    if (!permitted) {
+      await unregisterCurrentDevice();
+      return;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      var apnsToken = await messaging.getAPNSToken();
+      for (var attempt = 0; apnsToken == null && attempt < 5; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        apnsToken = await messaging.getAPNSToken();
+      }
+      if (apnsToken == null) {
+        debugPrint('[Pollo Móvil] APNs token pending; registration will retry later.');
+        return;
+      }
+    }
+
+    final token = await messaging.getToken();
+    if (token != null && token.isNotEmpty) await registerToken(token);
+  }
+
+  @override
+  Future<String?> getDeviceToken() async {
+    if (!isAvailable || !await isEnabled) return null;
+    await initialize();
+    try {
+      return await FirebaseMessaging.instance.getToken();
+    } catch (error) {
+      debugPrint('[Pollo Móvil] Push token unavailable: ${error.runtimeType}');
+      return null;
+    }
+  }
+
+  @override
+  Future<void> registerToken(String token) async {
+    if (!isAvailable || token.isEmpty) return;
+    try {
+      final client = Supabase.instance.client;
+      if (client.auth.currentSession == null) return;
+      final platform = defaultTargetPlatform == TargetPlatform.iOS ? 'ios' : 'android';
+      await client.functions.invoke(
+        'device_tokens',
+        body: {'action': 'register', 'token': token, 'platform': platform},
+      );
+    } catch (error) {
+      // Offline registration is retried on the next authenticated app start.
+      debugPrint('[Pollo Móvil] Push token registration deferred: ${error.runtimeType}');
+    }
+  }
+
+  @override
+  Future<void> unregisterCurrentDevice() async {
+    await _secureStorage.write(key: _enabledKey, value: 'false');
+    if (!isAvailable) return;
+    try {
+      await initialize();
+      await FirebaseMessaging.instance.setAutoInitEnabled(false);
+    } catch (error) {
+      debugPrint('[Pollo Móvil] Push initialization during revocation failed: ${error.runtimeType}');
+    }
+
+    try {
+      final client = Supabase.instance.client;
+      final token = await FirebaseMessaging.instance.getToken();
+      if (client.auth.currentSession != null && token != null && token.isNotEmpty) {
+        try {
+          await client.functions.invoke(
+            'device_tokens',
+            body: {'action': 'unregister', 'token': token},
+          );
+        } catch (error) {
+          debugPrint('[Pollo Móvil] Push token removal deferred: ${error.runtimeType}');
+        }
+      }
+    } catch (error) {
+      debugPrint('[Pollo Móvil] Push token removal deferred: ${error.runtimeType}');
+    }
+
+    try {
+      // Revoke the FCM token too, so a failed offline API request cannot leave
+      // notifications for the previous account routable to this installation.
+      await FirebaseMessaging.instance.deleteToken();
+    } catch (error) {
+      // Sign-out should still proceed if Firebase or the network is unavailable.
+      debugPrint('[Pollo Móvil] Push token revocation deferred: ${error.runtimeType}');
+    }
+  }
+
+  @override
+  Stream<PushNotification> get onForegroundMessage =>
+      _foregroundController.stream;
+
+  @override
+  Stream<PushNotification> get onNotificationOpened => _openedController.stream;
+
+  @override
+  Future<PushNotification?> getInitialMessage() async {
+    if (!isAvailable) return null;
+    await initialize();
+    final message = await FirebaseMessaging.instance.getInitialMessage();
+    return message == null ? null : _fromRemoteMessage(message);
+  }
+
+  Future<void> dispose() async {
+    await _foregroundSubscription?.cancel();
+    await _openedSubscription?.cancel();
+    await _tokenSubscription?.cancel();
+    await _foregroundController.close();
+    await _openedController.close();
+  }
+
+  PushNotification _fromRemoteMessage(RemoteMessage message) => PushNotification(
+        title: message.notification?.title ?? '',
+        body: message.notification?.body ?? '',
+        data: Map<String, dynamic>.from(message.data),
+      );
+}
+
 final notificationServiceProvider = Provider<NotificationService>((ref) {
-  return const NoOpNotificationService();
+  final service = FirebaseNotificationService();
+  ref.onDispose(() => unawaited(service.dispose()));
+  return service;
 });

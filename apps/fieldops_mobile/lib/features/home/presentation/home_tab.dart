@@ -69,7 +69,7 @@ class HomeTab extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('FieldOps'),
+        title: const Text('Pollo Móvil'),
         centerTitle: false,
         actions: const [SyncStatusPill()],
       ),

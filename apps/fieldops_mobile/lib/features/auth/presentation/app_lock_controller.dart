@@ -67,7 +67,7 @@ class AppLockController extends Notifier<AppLockState> {
       }
 
       final didAuthenticate = await auth.authenticate(
-        localizedReason: 'Verify your identity to continue using FieldOps',
+        localizedReason: 'Verifica tu identidad para continuar usando Pollo Móvil',
         options: const AuthenticationOptions(
           biometricOnly: false, // Allow PIN/pattern fallback
           stickyAuth: true,

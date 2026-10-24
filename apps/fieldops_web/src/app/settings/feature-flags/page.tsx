@@ -10,7 +10,7 @@ interface Flag {
   flag_key: string;
   description: string | null;
   enabled: boolean;
-  source: "default" | "company_override";
+  source: "default" | "company_override" | "disabled_in_pollo_movil";
 }
 
 interface ListResponse {
@@ -56,7 +56,7 @@ export default function FeatureFlagsPage() {
 
   async function setOverride(flagKey: string, enabled: boolean) {
     const previous = flags.find((f) => f.flag_key === flagKey);
-    if (!previous) return;
+    if (!previous || previous.source === "disabled_in_pollo_movil") return;
     setRowState((m) => ({ ...m, [flagKey]: "saving" }));
     setRowError((m) => {
       const n = { ...m };
@@ -100,7 +100,7 @@ export default function FeatureFlagsPage() {
 
   async function clearOverride(flagKey: string) {
     const previous = flags.find((f) => f.flag_key === flagKey);
-    if (!previous) return;
+    if (!previous || previous.source === "disabled_in_pollo_movil") return;
     setRowState((m) => ({ ...m, [flagKey]: "saving" }));
     setRowError((m) => {
       const n = { ...m };
@@ -160,7 +160,8 @@ export default function FeatureFlagsPage() {
         <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">Feature Flags</h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
           Toggle features on or off for your company. Overrides win over the
-          global default until you reset them.
+          global default until you reset them. Continuous GPS tracking is disabled
+          in Pollo Móvil; optional location checks only happen at clock-in/out.
         </p>
       </div>
 
@@ -192,6 +193,7 @@ export default function FeatureFlagsPage() {
                 const s = rowState[f.flag_key] ?? "idle";
                 const err = rowError[f.flag_key];
                 const isOverride = f.source === "company_override";
+                const isProductDisabled = f.source === "disabled_in_pollo_movil";
                 return (
                   <tr
                     key={f.flag_key}
@@ -208,11 +210,11 @@ export default function FeatureFlagsPage() {
                       )}
                     </td>
                     <td className="px-5 py-4">
-                      <label className="inline-flex cursor-pointer items-center gap-2">
+                      <label className={`inline-flex items-center gap-2 ${isProductDisabled ? "cursor-not-allowed opacity-70" : "cursor-pointer"}`}>
                         <input
                           type="checkbox"
                           checked={f.enabled}
-                          disabled={s === "saving"}
+                          disabled={s === "saving" || isProductDisabled}
                           onChange={(e) =>
                             setOverride(f.flag_key, e.target.checked)
                           }
@@ -235,11 +237,15 @@ export default function FeatureFlagsPage() {
                             : "bg-stone-100 text-stone-500"
                         }`}
                       >
-                        {isOverride ? "Company override" : "Default"}
+                        {isProductDisabled
+                          ? "Disabled in Pollo Móvil"
+                          : isOverride ? "Company override" : "Default"}
                       </span>
                     </td>
                     <td className="px-5 py-4 text-right">
-                      {isOverride ? (
+                      {isProductDisabled ? (
+                        <span className="text-xs text-stone-400">Not configurable</span>
+                      ) : isOverride ? (
                         <button
                           onClick={() => clearOverride(f.flag_key)}
                           disabled={s === "saving"}

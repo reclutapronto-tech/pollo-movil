@@ -1,0 +1,169 @@
+name: Supabase - Migrations, Edge and operations
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/supabase-backend.yml"
+      - "infra/supabase/**"
+      - "infra/timefold/**"
+      - "!infra/**/*.md"
+      - "apps/fieldops_web/scripts/restaurant-ops-ci-integration.mjs"
+      - "apps/fieldops_web/package-lock.json"
+  push:
+    branches: [pollo-movil]
+    paths:
+      - ".github/workflows/supabase-backend.yml"
+      - "infra/supabase/**"
+      - "infra/timefold/**"
+      - "!infra/**/*.md"
+      - "apps/fieldops_web/scripts/restaurant-ops-ci-integration.mjs"
+      - "apps/fieldops_web/package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  supabase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+          cache: npm
+          cache-dependency-path: apps/fieldops_web/package-lock.json
+
+      - name: Install locked integration client
+        working-directory: apps/fieldops_web
+        run: npm ci
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+        with:
+          version: 2.121.0
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: 2.9.7
+
+      - name: Run Edge Function unit tests
+        run: |
+          deno test --allow-env --allow-net --allow-read \
+            infra/supabase/functions/_shared/restaurant-optimizer_test.ts \
+            infra/supabase/functions/_shared/timefold-client_test.ts \
+            infra/supabase/functions/tags/index_test.ts \
+            infra/supabase/functions/galleries/index_test.ts
+
+      - name: Start an isolated local Supabase stack and apply migrations
+        env:
+          SUPABASE_INTERNAL_IMAGE_REGISTRY: ghcr.io
+        run: |
+          docker network create pollo-movil-local
+          supabase start --workdir infra --network-id pollo-movil-local \
+            --exclude studio,imgproxy,mailpit,logflare,vector,supavisor,postgres-meta
+          supabase db reset --workdir infra --local --yes --network-id pollo-movil-local
+          supabase test db --workdir infra --local --network-id pollo-movil-local
+          supabase status --workdir infra --output env > "$RUNNER_TEMP/supabase.env"
+          set -a
+          source "$RUNNER_TEMP/supabase.env"
+          set +a
+          echo "::add-mask::$ANON_KEY"
+          echo "::add-mask::$SERVICE_ROLE_KEY"
+          printf 'SUPABASE_URL=%s\n' "$API_URL" >> "$GITHUB_ENV"
+          printf 'SUPABASE_ANON_KEY=%s\n' "$ANON_KEY" >> "$GITHUB_ENV"
+          printf 'SUPABASE_SERVICE_ROLE_KEY=%s\n' "$SERVICE_ROLE_KEY" >> "$GITHUB_ENV"
+
+      - name: Run authenticated restaurant operations through Timefold and fallback
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          functions_pid=""
+          cleanup() {
+            if [ -n "$functions_pid" ] && kill -0 "$functions_pid" 2>/dev/null; then
+              kill "$functions_pid"
+            fi
+            docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml down --volumes
+            supabase stop --workdir infra --no-backup
+          }
+          trap cleanup EXIT
+
+          timefold_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$timefold_token"
+          printf 'TIMEFOLD_API_TOKEN=%s\n' "$timefold_token" >> "$GITHUB_ENV"
+          printf 'TIMEFOLD_API_TOKEN=%s\n' "$timefold_token" > "$RUNNER_TEMP/timefold.env"
+          chmod 600 "$RUNNER_TEMP/timefold.env"
+          docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml up --build --detach
+
+          cat > "$RUNNER_TEMP/restaurant-ops.env" <<EOF
+          SUPABASE_URL=http://kong:8000
+          SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY
+          TIMEFOLD_SERVICE_URL=http://timefold:8080/api/assignments/solve
+          TIMEFOLD_SERVICE_TOKEN=$timefold_token
+          EOF
+          chmod 600 "$RUNNER_TEMP/restaurant-ops.env"
+
+          supabase functions serve restaurant_ops --workdir infra --network-id pollo-movil-local \
+            --no-verify-jwt --env-file "$RUNNER_TEMP/restaurant-ops.env" \
+            > "$RUNNER_TEMP/restaurant-ops-edge.log" 2>&1 &
+          functions_pid=$!
+
+          status=000
+          for attempt in $(seq 1 60); do
+            if status="$(curl --silent --show-error --max-time 2 --output /dev/null --write-out '%{http_code}' \
+              --header "apikey: $SUPABASE_ANON_KEY" \
+              "$SUPABASE_URL/functions/v1/restaurant_ops")"; then
+              if [ "$status" = "401" ]; then break; fi
+            else
+              status=000
+            fi
+            sleep 2
+          done
+          test "$status" = "401"
+          for attempt in $(seq 1 60); do
+            if status="$(curl --silent --show-error --max-time 2 --output /dev/null --write-out '%{http_code}' \
+              http://127.0.0.1:18088/api/assignments/health)"; then
+              if [ "$status" = "200" ]; then break; fi
+            else
+              status=000
+            fi
+            sleep 2
+          done
+          test "$status" = "200"
+
+          node apps/fieldops_web/scripts/restaurant-ops-ci-integration.mjs --phase real
+          docker compose --env-file "$RUNNER_TEMP/timefold.env" -f infra/timefold/compose.yaml stop timefold
+          node apps/fieldops_web/scripts/restaurant-ops-ci-integration.mjs --phase fallback
+          grep -q 'assignment_solver_fallback' "$RUNNER_TEMP/restaurant-ops-edge.log"
+
+      - name: Save redacted local-service logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/pollo-logs"
+          if [ -f "$RUNNER_TEMP/restaurant-ops-edge.log" ]; then
+            sed -E 's/(Bearer )[A-Za-z0-9._-]+/\1[REDACTED]/g' "$RUNNER_TEMP/restaurant-ops-edge.log" > "$RUNNER_TEMP/pollo-logs/edge.log"
+          fi
+          docker ps -a --format '{{.Names}} {{.Status}}' > "$RUNNER_TEMP/pollo-logs/containers.txt"
+
+      - name: Upload Supabase and Edge logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: supabase-edge-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/pollo-logs/
+          if-no-files-found: ignore
+          retention-days: 14
