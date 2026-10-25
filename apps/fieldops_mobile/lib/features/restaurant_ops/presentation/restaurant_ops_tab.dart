@@ -19,9 +19,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 enum RestaurantOpsSection { shift, waste, incidents, handoff }
 
 class RestaurantOpsTab extends ConsumerWidget {
-  const RestaurantOpsTab({super.key, required this.section});
+  const RestaurantOpsTab({super.key, required this.section, this.workerFocus});
 
   final RestaurantOpsSection section;
+  final String? workerFocus;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -66,6 +67,7 @@ class RestaurantOpsTab extends ConsumerWidget {
           ),
           data: (data) => _RestaurantSection(
             section: section,
+            workerFocus: workerFocus,
             branchId: branchId,
             branchName:
                 (data['branch'] as Map<String, dynamic>?)?['name'] as String? ??
@@ -87,6 +89,7 @@ class RestaurantOpsTab extends ConsumerWidget {
 class _RestaurantSection extends ConsumerStatefulWidget {
   const _RestaurantSection({
     required this.section,
+    this.workerFocus,
     required this.branchId,
     required this.branchName,
     required this.branchOptions,
@@ -96,6 +99,7 @@ class _RestaurantSection extends ConsumerStatefulWidget {
   });
 
   final RestaurantOpsSection section;
+  final String? workerFocus;
   final String branchId;
   final String branchName;
   final List<Map<String, dynamic>> branchOptions;
@@ -162,11 +166,17 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     super.dispose();
   }
 
-  String _title(AppLocalizations l10n) => switch (widget.section) {
-    RestaurantOpsSection.shift => l10n.restaurantOpsShiftTitle,
-    RestaurantOpsSection.waste => l10n.restaurantOpsWasteTitle,
-    RestaurantOpsSection.incidents => l10n.restaurantOpsIncidentsTitle,
-    RestaurantOpsSection.handoff => l10n.restaurantOpsHandoffTitle,
+  String _title(AppLocalizations l10n) => switch (widget.workerFocus) {
+    'tasks' => 'Mis tareas',
+    'notices' => 'Avisos',
+    'shift' => 'Mi turno',
+    'record' => 'Registrar actividad',
+    _ => switch (widget.section) {
+      RestaurantOpsSection.shift => l10n.restaurantOpsShiftTitle,
+      RestaurantOpsSection.waste => l10n.restaurantOpsWasteTitle,
+      RestaurantOpsSection.incidents => l10n.restaurantOpsIncidentsTitle,
+      RestaurantOpsSection.handoff => l10n.restaurantOpsHandoffTitle,
+    },
   };
 
   Future<void> _run(Future<Map<String, dynamic>> Function() operation) async {
@@ -197,20 +207,34 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
   }
 
   Widget _declaredMealTimeControl() => _SectionCard(
-    child: Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-      Text(_declaredMealAt == null
-          ? 'Hora declarada opcional: se usará la hora efectiva del registro.'
-          : 'Hora declarada: ${MaterialLocalizations.of(context).formatShortDate(_declaredMealAt!)} · ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(_declaredMealAt!))}'),
-      OutlinedButton.icon(
-        onPressed: _saving ? null : _pickDeclaredMealTime,
-        icon: const Icon(Icons.edit_calendar_outlined),
-        label: Text(_declaredMealAt == null ? 'Indicar otra hora' : 'Cambiar hora declarada'),
-      ),
-      if (_declaredMealAt != null) TextButton(
-        onPressed: _saving ? null : () => setState(() => _declaredMealAt = null),
-        child: const Text('Usar hora del registro'),
-      ),
-    ]),
+    child: Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(
+          _declaredMealAt == null
+              ? 'Hora declarada opcional: se usará la hora efectiva del registro.'
+              : 'Hora declarada: ${MaterialLocalizations.of(context).formatShortDate(_declaredMealAt!)} · ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(_declaredMealAt!))}',
+        ),
+        OutlinedButton.icon(
+          onPressed: _saving ? null : _pickDeclaredMealTime,
+          icon: const Icon(Icons.edit_calendar_outlined),
+          label: Text(
+            _declaredMealAt == null
+                ? 'Indicar otra hora'
+                : 'Cambiar hora declarada',
+          ),
+        ),
+        if (_declaredMealAt != null)
+          TextButton(
+            onPressed: _saving
+                ? null
+                : () => setState(() => _declaredMealAt = null),
+            child: const Text('Usar hora del registro'),
+          ),
+      ],
+    ),
   );
 
   Future<void> _pickDeclaredMealTime() async {
@@ -224,13 +248,20 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     if (selectedDate == null || !mounted) return;
     final selectedTime = await showTimePicker(
       context: context,
-      initialTime: _declaredMealAt == null ? TimeOfDay.fromDateTime(now) : TimeOfDay.fromDateTime(_declaredMealAt!),
+      initialTime: _declaredMealAt == null
+          ? TimeOfDay.fromDateTime(now)
+          : TimeOfDay.fromDateTime(_declaredMealAt!),
     );
     if (selectedTime == null || !mounted) return;
-    setState(() => _declaredMealAt = DateTime(
-      selectedDate.year, selectedDate.month, selectedDate.day,
-      selectedTime.hour, selectedTime.minute,
-    ));
+    setState(
+      () => _declaredMealAt = DateTime(
+        selectedDate.year,
+        selectedDate.month,
+        selectedDate.day,
+        selectedTime.hour,
+        selectedTime.minute,
+      ),
+    );
   }
 
   Future<void> _deliverHandoff(String? recipientId) async {
@@ -401,9 +432,8 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     if (type.startsWith('shift_cover_')) {
       Navigator.of(context).push<void>(
         MaterialPageRoute(
-          builder: (_) => RestaurantShiftCoverageScreen(
-            branchId: widget.branchId,
-          ),
+          builder: (_) =>
+              RestaurantShiftCoverageScreen(branchId: widget.branchId),
         ),
       );
       return;
@@ -473,16 +503,25 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       if (note == null || !mounted) return;
     }
     String? evidencePath;
-    final evidencePolicy = task['evidence_policy'] as String? ??
+    final evidencePolicy =
+        task['evidence_policy'] as String? ??
         (task['requires_evidence'] == true ? 'required' : 'none');
     if (action == 'complete' && evidencePolicy == 'independent_review') {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Esta actividad requiere reportarse y ser validada por otra persona.'),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Esta actividad requiere reportarse y ser validada por otra persona.',
+          ),
+        ),
+      );
       return;
     }
     if (action == 'complete' && evidencePolicy != 'none') {
-      final captured = await _captureTaskEvidence(task, partId: partId, mandatory: evidencePolicy == 'required');
+      final captured = await _captureTaskEvidence(
+        task,
+        partId: partId,
+        mandatory: evidencePolicy == 'required',
+      );
       if (!captured.$1 || !mounted) return;
       evidencePath = captured.$2;
     }
@@ -550,7 +589,10 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     final pendingEvents = ref
         .watch(restaurantOutboxEventsProvider(widget.branchId))
-        .maybeWhen(data: (events) => events, orElse: () => const <PendingEvent>[]);
+        .maybeWhen(
+          data: (events) => events,
+          orElse: () => const <PendingEvent>[],
+        );
     final taskDisplayData = userId == null
         ? widget.data
         : projectPendingRestaurantTaskActions(
@@ -628,8 +670,10 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
         pendingWasteReview,
         pendingAreaInspections,
       ),
-      RestaurantOpsSection.incidents =>
-        _incidentContent(displayData, pendingIncidents),
+      RestaurantOpsSection.incidents => _incidentContent(
+        displayData,
+        pendingIncidents,
+      ),
       RestaurantOpsSection.handoff => _handoffContent(
         userId,
         pendingHandoffAcknowledgements,
@@ -727,12 +771,15 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
         .where(
           (shift) =>
               shift['employee_id'] == userId &&
-              ((shift['shift_date'] as String? ?? '').compareTo(localDate) >= 0 ||
+              ((shift['shift_date'] as String? ?? '').compareTo(localDate) >=
+                      0 ||
                   shift['currently_active'] == true),
         )
         .toList();
     final members = _maps(data['members']);
-    final operationalWorkspace = ref.watch(restaurantOperationalWorkspaceProvider(widget.branchId));
+    final operationalWorkspace = ref.watch(
+      restaurantOperationalWorkspaceProvider(widget.branchId),
+    );
     final matchingMembers = members.where((item) => item['user_id'] == userId);
     final member = matchingMembers.isEmpty ? null : matchingMembers.first;
     final serving = member?['customer_service_active'] == true;
@@ -744,7 +791,11 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       return _workerShiftContent(userId, ownTasks, shifts, data, l10n);
     }
     final currentShiftEmployeeIds = _maps(data['shifts'])
-        .where((shift) => shift['currently_active'] == true && shift['status'] == 'published')
+        .where(
+          (shift) =>
+              shift['currently_active'] == true &&
+              shift['status'] == 'published',
+        )
         .map((shift) => shift['employee_id'] as String?)
         .whereType<String>()
         .toSet();
@@ -752,66 +803,180 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       data: (value) {
         final activeMeals = _maps(value['active_meals']);
         final states = _maps(value['operational_states']);
-        final activeMealByEmployee = {for (final meal in activeMeals) meal['employee_id'] as String: meal};
-        final stateByEmployee = {for (final row in states) row['employee_id'] as String: row['state'] as String? ?? 'available'};
+        final activeMealByEmployee = {
+          for (final meal in activeMeals) meal['employee_id'] as String: meal,
+        };
+        final stateByEmployee = {
+          for (final row in states)
+            row['employee_id'] as String:
+                row['state'] as String? ?? 'available',
+        };
         return members
-            .where((item) => item['is_active'] != false && currentShiftEmployeeIds.contains(item['user_id']))
+            .where(
+              (item) =>
+                  item['is_active'] != false &&
+                  currentShiftEmployeeIds.contains(item['user_id']),
+            )
             .map<Widget>((item) {
-          final employeeId = item['user_id'] as String;
-          final activeMeal = activeMealByEmployee[employeeId];
-          final state = stateByEmployee[employeeId] ?? 'sin estado registrado';
-          final stateDraft = _managerOperationalStateDrafts[employeeId] ?? (state == 'sin estado registrado' ? 'available' : state);
-          final user = item['user'] is Map<String, dynamic> ? item['user'] as Map<String, dynamic> : const <String, dynamic>{};
-          final employeeName = user['full_name'] as String? ?? item['user_name'] as String? ?? employeeId;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _SectionCard(child: ListTile(
-              title: Text(employeeName),
-              subtitle: Text(activeMeal == null ? 'Estado: $state' : 'Comida activa · estado: $state'),
-              trailing: activeMeal == null
-                  ? Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                      DropdownButton<String>(
-                        value: const {'available', 'occupied', 'rest', 'off_shift'}.contains(stateDraft) ? stateDraft : 'available',
-                        items: const [
-                          DropdownMenuItem(value: 'available', child: Text('Disponible')),
-                          DropdownMenuItem(value: 'occupied', child: Text('Ocupado')),
-                          DropdownMenuItem(value: 'rest', child: Text('En descanso')),
-                          DropdownMenuItem(value: 'off_shift', child: Text('Fuera de turno')),
-                        ],
-                        onChanged: _saving ? null : (value) {
-                          if (value != null) setState(() => _managerOperationalStateDrafts[employeeId] = value);
-                        },
-                      ),
-                      TextButton(
-                        onPressed: _saving || stateDraft == state ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider).setOperationalState(
-                          branchId: widget.branchId, employeeId: employeeId, state: stateDraft,
-                        )),
-                        child: const Text('Guardar estado'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _saving || (data['branch'] as Map<String, dynamic>?)?['meal_duration_minutes'] == null || const {'rest', 'off_shift'}.contains(state)
-                            ? null
-                          : () => _run(() => ref.read(restaurantOpsRepositoryProvider).startMeal(branchId: widget.branchId, employeeId: employeeId, declaredAt: _declaredMealAt)),
-                        child: const Text('Registrar comida'),
-                      ),
-                    ])
-                  : Wrap(spacing: 4, children: [
-                      OutlinedButton(
-                        onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider).confirmMealReturn(
-                          branchId: widget.branchId, sessionId: activeMeal['id'] as String, stateAfterReturn: 'available', declaredAt: _declaredMealAt,
-                        )),
-                        child: const Text('Regresó disponible'),
-                      ),
-                      OutlinedButton(
-                        onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider).confirmMealReturn(
-                          branchId: widget.branchId, sessionId: activeMeal['id'] as String, stateAfterReturn: 'busy', declaredAt: _declaredMealAt,
-                        )),
-                        child: const Text('Regresó ocupado'),
-                      ),
-                    ]),
-            )),
-          );
-        }).toList(growable: false);
+              final employeeId = item['user_id'] as String;
+              final activeMeal = activeMealByEmployee[employeeId];
+              final state =
+                  stateByEmployee[employeeId] ?? 'sin estado registrado';
+              final stateDraft =
+                  _managerOperationalStateDrafts[employeeId] ??
+                  (state == 'sin estado registrado' ? 'available' : state);
+              final user = item['user'] is Map<String, dynamic>
+                  ? item['user'] as Map<String, dynamic>
+                  : const <String, dynamic>{};
+              final employeeName =
+                  user['full_name'] as String? ??
+                  item['user_name'] as String? ??
+                  employeeId;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _SectionCard(
+                  child: ListTile(
+                    title: Text(employeeName),
+                    subtitle: Text(
+                      activeMeal == null
+                          ? 'Estado: $state'
+                          : 'Comida activa · estado: $state',
+                    ),
+                    trailing: activeMeal == null
+                        ? Wrap(
+                            spacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              DropdownButton<String>(
+                                value:
+                                    const {
+                                      'available',
+                                      'occupied',
+                                      'rest',
+                                      'off_shift',
+                                    }.contains(stateDraft)
+                                    ? stateDraft
+                                    : 'available',
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'available',
+                                    child: Text('Disponible'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'occupied',
+                                    child: Text('Ocupado'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'rest',
+                                    child: Text('En descanso'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'off_shift',
+                                    child: Text('Fuera de turno'),
+                                  ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) {
+                                        if (value != null)
+                                          setState(
+                                            () =>
+                                                _managerOperationalStateDrafts[employeeId] =
+                                                    value,
+                                          );
+                                      },
+                              ),
+                              TextButton(
+                                onPressed: _saving || stateDraft == state
+                                    ? null
+                                    : () => _run(
+                                        () => ref
+                                            .read(
+                                              restaurantOpsRepositoryProvider,
+                                            )
+                                            .setOperationalState(
+                                              branchId: widget.branchId,
+                                              employeeId: employeeId,
+                                              state: stateDraft,
+                                            ),
+                                      ),
+                                child: const Text('Guardar estado'),
+                              ),
+                              OutlinedButton(
+                                onPressed:
+                                    _saving ||
+                                        (data['branch']
+                                                as Map<
+                                                  String,
+                                                  dynamic
+                                                >?)?['meal_duration_minutes'] ==
+                                            null ||
+                                        const {
+                                          'rest',
+                                          'off_shift',
+                                        }.contains(state)
+                                    ? null
+                                    : () => _run(
+                                        () => ref
+                                            .read(
+                                              restaurantOpsRepositoryProvider,
+                                            )
+                                            .startMeal(
+                                              branchId: widget.branchId,
+                                              employeeId: employeeId,
+                                              declaredAt: _declaredMealAt,
+                                            ),
+                                      ),
+                                child: const Text('Registrar comida'),
+                              ),
+                            ],
+                          )
+                        : Wrap(
+                            spacing: 4,
+                            children: [
+                              OutlinedButton(
+                                onPressed: _saving
+                                    ? null
+                                    : () => _run(
+                                        () => ref
+                                            .read(
+                                              restaurantOpsRepositoryProvider,
+                                            )
+                                            .confirmMealReturn(
+                                              branchId: widget.branchId,
+                                              sessionId:
+                                                  activeMeal['id'] as String,
+                                              stateAfterReturn: 'available',
+                                              declaredAt: _declaredMealAt,
+                                            ),
+                                      ),
+                                child: const Text('Regresó disponible'),
+                              ),
+                              OutlinedButton(
+                                onPressed: _saving
+                                    ? null
+                                    : () => _run(
+                                        () => ref
+                                            .read(
+                                              restaurantOpsRepositoryProvider,
+                                            )
+                                            .confirmMealReturn(
+                                              branchId: widget.branchId,
+                                              sessionId:
+                                                  activeMeal['id'] as String,
+                                              stateAfterReturn: 'busy',
+                                              declaredAt: _declaredMealAt,
+                                            ),
+                                      ),
+                                child: const Text('Regresó ocupado'),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+              );
+            })
+            .toList(growable: false);
       },
       orElse: () => const <Widget>[],
     );
@@ -819,47 +984,107 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       data: (value) {
         final reports = _maps(value['task_reports']);
         final reviews = _maps(value['task_report_reviews']);
-        return reports.where((report) => !reviews.any((review) => review['report_id'] == report['id']))
+        return reports
+            .where(
+              (report) =>
+                  !reviews.any((review) => review['report_id'] == report['id']),
+            )
             .map<Widget>((report) {
-          final responsibleId = report['responsible_employee_id'];
-          final recorderId = report['recorded_by'];
-          String nameFor(Object? id) {
-            final member = members.where((row) => row['user_id'] == id).toList(growable: false);
-            final user = member.isNotEmpty && member.first['user'] is Map<String, dynamic>
-                ? member.first['user'] as Map<String, dynamic> : const <String, dynamic>{};
-            return user['full_name'] as String? ?? id?.toString() ?? 'Integrante';
-          }
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _SectionCard(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Actividad pendiente de validación · ${report['task_id']}', style: Theme.of(context).textTheme.titleSmall),
-              Text('Responsable: ${nameFor(responsibleId)} · Registró: ${nameFor(recorderId)}'),
-              Text('Realización declarada: ${report['declared_completed_at']} · Registro efectivo: ${report['recorded_at']}'),
-              if (report['evidence_path'] is String) TextButton.icon(
-                onPressed: _saving ? null : () => _openTaskReportEvidence(report),
-                icon: const Icon(Icons.visibility_outlined), label: const Text('Ver evidencia privada'),
-              ),
-              Wrap(spacing: 8, children: [
-                FilledButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider).reviewTaskReport(
-                  branchId: widget.branchId, reportId: report['id'] as String, decision: 'accepted',
-                )), child: const Text('Validar')),
-                OutlinedButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider).reviewTaskReport(
-                  branchId: widget.branchId, reportId: report['id'] as String, decision: 'rejected',
-                )), child: const Text('Rechazar')),
-              ]),
-            ])),
-          );
-        }).toList(growable: false);
+              final responsibleId = report['responsible_employee_id'];
+              final recorderId = report['recorded_by'];
+              String nameFor(Object? id) {
+                final member = members
+                    .where((row) => row['user_id'] == id)
+                    .toList(growable: false);
+                final user =
+                    member.isNotEmpty &&
+                        member.first['user'] is Map<String, dynamic>
+                    ? member.first['user'] as Map<String, dynamic>
+                    : const <String, dynamic>{};
+                return user['full_name'] as String? ??
+                    id?.toString() ??
+                    'Integrante';
+              }
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _SectionCard(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Actividad pendiente de validación · ${report['task_id']}',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      Text(
+                        'Responsable: ${nameFor(responsibleId)} · Registró: ${nameFor(recorderId)}',
+                      ),
+                      Text(
+                        'Realización declarada: ${report['declared_completed_at']} · Registro efectivo: ${report['recorded_at']}',
+                      ),
+                      if (report['evidence_path'] is String)
+                        TextButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => _openTaskReportEvidence(report),
+                          icon: const Icon(Icons.visibility_outlined),
+                          label: const Text('Ver evidencia privada'),
+                        ),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          FilledButton(
+                            onPressed: _saving
+                                ? null
+                                : () => _run(
+                                    () => ref
+                                        .read(restaurantOpsRepositoryProvider)
+                                        .reviewTaskReport(
+                                          branchId: widget.branchId,
+                                          reportId: report['id'] as String,
+                                          decision: 'accepted',
+                                        ),
+                                  ),
+                            child: const Text('Validar'),
+                          ),
+                          OutlinedButton(
+                            onPressed: _saving
+                                ? null
+                                : () => _run(
+                                    () => ref
+                                        .read(restaurantOpsRepositoryProvider)
+                                        .reviewTaskReport(
+                                          branchId: widget.branchId,
+                                          reportId: report['id'] as String,
+                                          decision: 'rejected',
+                                        ),
+                                  ),
+                            child: const Text('Rechazar'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            })
+            .toList(growable: false);
       },
       orElse: () => const <Widget>[],
     );
     return [
       _SectionTitle(title: 'Comidas del turno · registro por compañero'),
-      if (managerMealControls.isEmpty) _InfoCard(text: 'No hay compañeros con turno activo para registrar una comida.'),
+      if (managerMealControls.isEmpty)
+        _InfoCard(
+          text: 'No hay compañeros con turno activo para registrar una comida.',
+        ),
       if (managerMealControls.isNotEmpty) _declaredMealTimeControl(),
       ...managerMealControls,
       _SectionTitle(title: 'Reportes de actividad por validar'),
-      if (pendingTaskReports.isEmpty) _InfoCard(text: 'No hay reportes pendientes de validación independiente.'),
+      if (pendingTaskReports.isEmpty)
+        _InfoCard(
+          text: 'No hay reportes pendientes de validación independiente.',
+        ),
       ...pendingTaskReports,
       _SectionCard(
         child: ListTile(
@@ -940,9 +1165,8 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
           trailing: const Icon(Icons.chevron_right_rounded),
           onTap: () => Navigator.of(context).push<void>(
             MaterialPageRoute(
-              builder: (_) => RestaurantShiftCoverageScreen(
-                branchId: widget.branchId,
-              ),
+              builder: (_) =>
+                  RestaurantShiftCoverageScreen(branchId: widget.branchId),
             ),
           ),
         ),
@@ -1187,10 +1411,16 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     Map<String, dynamic> data,
     AppLocalizations l10n,
   ) {
-    final workspace = ref.watch(restaurantOperationalWorkspaceProvider(widget.branchId));
-    final notices = ref.watch(restaurantCollaborationInboxProvider(widget.branchId));
+    final workspace = ref.watch(
+      restaurantOperationalWorkspaceProvider(widget.branchId),
+    );
+    final notices = ref.watch(
+      restaurantCollaborationInboxProvider(widget.branchId),
+    );
     final activeMeals = workspace.maybeWhen(
-      data: (value) => _maps(value['active_meals']).where((meal) => meal['employee_id'] == userId).toList(growable: false),
+      data: (value) => _maps(
+        value['active_meals'],
+      ).where((meal) => meal['employee_id'] == userId).toList(growable: false),
       orElse: () => const <Map<String, dynamic>>[],
     );
     final activeMeal = activeMeals.isEmpty ? null : activeMeals.first;
@@ -1206,173 +1436,437 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       data: (value) => value['can_record_peer_meals'] == true,
       orElse: () => false,
     );
-    final ownStates = stateRows.where((row) => row['employee_id'] == userId).toList(growable: false);
-    final state = ownStates.isEmpty ? 'available' : ownStates.first['state'] as String? ?? 'available';
-    final hasActiveShift = shifts.any((shift) =>
-        shift['currently_active'] == true && shift['status'] == 'published');
-    final effectiveState = activeMeal != null ? 'meal' : hasActiveShift ? state : 'off_shift';
+    final ownStates = stateRows
+        .where((row) => row['employee_id'] == userId)
+        .toList(growable: false);
+    final state = ownStates.isEmpty
+        ? 'available'
+        : ownStates.first['state'] as String? ?? 'available';
+    final hasActiveShift = shifts.any(
+      (shift) =>
+          shift['currently_active'] == true && shift['status'] == 'published',
+    );
+    final effectiveState = activeMeal != null
+        ? 'meal'
+        : hasActiveShift
+        ? state
+        : 'off_shift';
     final approvedMealSlots = workspace.maybeWhen(
-      data: (value) => _maps(value['meal_plan_slots']).where((slot) => slot['employee_id'] == userId).toList(growable: false),
+      data: (value) => _maps(
+        value['meal_plan_slots'],
+      ).where((slot) => slot['employee_id'] == userId).toList(growable: false),
       orElse: () => const <Map<String, dynamic>>[],
     );
     final coworkerTasks = _maps(data['coworker_tasks']);
-    final rows = <({Map<String, dynamic> task, String? partId, String employeeId, String label})>[];
+    final rows =
+        <
+          ({
+            Map<String, dynamic> task,
+            String? partId,
+            String employeeId,
+            String label,
+          })
+        >[];
     for (final task in coworkerTasks) {
       final parts = _maps(task['parts']);
       if (parts.isEmpty && task['assigned_to'] is String) {
-        rows.add((task: task, partId: null, employeeId: task['assigned_to'] as String, label: task['name'] as String? ?? 'Actividad'));
+        rows.add((
+          task: task,
+          partId: null,
+          employeeId: task['assigned_to'] as String,
+          label: task['name'] as String? ?? 'Actividad',
+        ));
       } else {
-        for (final part in parts.where((item) => item['assigned_to'] is String)) {
-          rows.add((task: task, partId: part['id'] as String?, employeeId: part['assigned_to'] as String,
-            label: '${task['name'] ?? 'Actividad'} · ${part['zone_name'] ?? 'Zona'}'));
+        for (final part in parts.where(
+          (item) => item['assigned_to'] is String,
+        )) {
+          rows.add((
+            task: task,
+            partId: part['id'] as String?,
+            employeeId: part['assigned_to'] as String,
+            label:
+                '${task['name'] ?? 'Actividad'} · ${part['zone_name'] ?? 'Zona'}',
+          ));
         }
       }
     }
     return [
-      if (approvedMealSlots.isNotEmpty) _InfoCard(text: 'Comida programada: ${approvedMealSlots.first['starts_at_local'] ?? ''}–${approvedMealSlots.first['scheduled_end_at_local'] ?? ''}. Horario aprobado; el inicio y el regreso se registran por separado.'),
-      _SectionTitle(title: 'Mis tareas'),
-      if (ownTasks.isEmpty) _InfoCard(text: 'No tienes tareas asignadas para este turno.'),
-      ...ownTasks.map(_taskCard),
-      _SectionTitle(title: 'Avisos para ayudar a un compañero'),
-      ...notices.maybeWhen(
-        data: (items) => items.take(12).map((notice) {
-          final task = notice['task'] is Map<String, dynamic>
-              ? notice['task'] as Map<String, dynamic> : const <String, dynamic>{};
-          final claimedByMe = notice['claimed_by'] == userId;
-          final claimedByOther = notice['claimed_by'] != null && !claimedByMe;
-          final claimedUntil = DateTime.tryParse(notice['claimed_until'] as String? ?? '');
-          final claimExpired = claimedByOther && claimedUntil != null && !claimedUntil.isAfter(DateTime.now());
-          final resolved = notice['status'] == 'resolved';
-          final cancelled = notice['status'] == 'cancelled';
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _SectionCard(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('¿Puedes avisarle personalmente a un compañero?', style: Theme.of(context).textTheme.titleSmall),
-                if (task['name'] != null) Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text('${task['name']} · ${task['scheduled_for'] ?? ''}'),
-                ),
-                if (notice['resolution'] == 'not_located') const Text('La persona anterior no pudo localizarlo; el aviso está disponible de nuevo.'),
-                if (resolved) const Text('Aviso resuelto. La tarea sigue pendiente hasta registrarse y verificarse.'),
-                if (cancelled) const Text('Aviso cancelado: el responsable confirmó la recepción de la tarea.'),
-                if (claimedByOther && !claimExpired) const Text('Otro compañero reservó este aviso; la reserva vence según la política de la sucursal.'),
-                if (claimExpired) const Text('La reserva venció; puedes intentar atender el aviso.'),
-                if (!resolved && !cancelled && (!claimedByOther || claimExpired)) Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Wrap(spacing: 8, runSpacing: 8, children: [
-                    if (!claimedByMe) OutlinedButton(
-                      onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-                        .claimCollaborativeNotice(branchId: widget.branchId, requestId: notice['id'] as String)),
-                      child: const Text('Voy a avisarle'),
-                    ),
-                    if (claimedByMe) FilledButton(
-                      onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-                        .resolveCollaborativeNotice(branchId: widget.branchId, requestId: notice['id'] as String, resolution: 'peer_notified')),
-                      child: const Text('Ya le avisé'),
-                    ),
-                    if (claimedByMe) OutlinedButton(
-                      onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-                        .resolveCollaborativeNotice(branchId: widget.branchId, requestId: notice['id'] as String, resolution: 'not_located')),
-                      child: const Text('No pude localizarlo'),
-                    ),
-                  ]),
-                ),
-              ]),
-            ),
-          );
-        }).toList(growable: false),
-        orElse: () => const <Widget>[],
-      ),
-      if (notices.hasError) _InfoCard(text: 'No se pudieron cargar los avisos. Actualiza para reintentar.'),
-      _SectionTitle(title: 'Mi turno'),
-      _SectionCard(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(shifts.isEmpty ? 'No hay un horario publicado para hoy.' : shifts.map((shift) => '${shift['shift_date']} · ${shift['start_time']}–${shift['end_time']}').join('\n')),
-        const SizedBox(height: 8),
-        Text('Estado operativo: ${_operationalStateLabel(effectiveState)}'),
-        _declaredMealTimeControl(),
-        if (activeMeal != null) ...[
-          const SizedBox(height: 8),
-          const Text('La comida continúa activa hasta confirmar el regreso.'),
-          Wrap(spacing: 8, children: [
-            OutlinedButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-              .confirmMealReturn(branchId: widget.branchId, sessionId: activeMeal['id'] as String, stateAfterReturn: 'available', declaredAt: _declaredMealAt)),
-              child: const Text('Regresé disponible')),
-            OutlinedButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-              .confirmMealReturn(branchId: widget.branchId, sessionId: activeMeal['id'] as String, stateAfterReturn: 'busy', declaredAt: _declaredMealAt)),
-              child: const Text('Regresé ocupado')),
-          ]),
-        ] else ...[
-          Wrap(spacing: 8, children: [
-            if (effectiveState != 'off_shift' && effectiveState != 'rest' && effectiveState != 'meal') FilledButton(onPressed: _saving || (widget.data['branch'] as Map<String, dynamic>?)?['meal_duration_minutes'] == null ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-              .startMeal(branchId: widget.branchId, declaredAt: _declaredMealAt)), child: const Text('Iniciar comida')),
-            if (effectiveState == 'available') OutlinedButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-              .setOperationalState(branchId: widget.branchId, state: 'occupied')), child: const Text('Estoy ocupado')),
-            if (effectiveState == 'occupied') OutlinedButton(onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-              .setOperationalState(branchId: widget.branchId, state: 'available')), child: const Text('Estoy disponible')),
-          ]),
-          if ((widget.data['branch'] as Map<String, dynamic>?)?['meal_duration_minutes'] == null)
-            const Padding(padding: EdgeInsets.only(top: 8), child: Text('La sucursal aún no configuró la duración de comida.')),
-        ],
-      ])),
-      if (canRecordPeerMeals && peerMealCandidates.isNotEmpty) ...[
-        _SectionTitle(title: 'Registrar comida por un compañero'),
-        const _InfoCard(text: 'El regreso requiere confirmación explícita; el tiempo programado no cambia automáticamente el estado laboral.'),
-        ...peerMealCandidates.map((candidate) {
-          final employeeId = candidate['employee_id'] as String?;
-          if (employeeId == null) return const SizedBox.shrink();
-          final employee = shifts.firstWhere(
-            (shift) => shift['employee_id'] == employeeId,
-            orElse: () => const <String, dynamic>{},
-          );
-          final activeSessionId = candidate['active_meal_session_id'] as String?;
-          final isOnMeal = activeSessionId != null;
-          final canStartPeerMeal = candidate['can_start_meal'] == true;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _SectionCard(child: ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(candidate['employee_name'] as String? ?? employee['employee_name'] as String? ?? 'Compañero'),
-              subtitle: Text(isOnMeal
-                  ? 'Comida activa; registrar regreso confirmado.'
-                  : canStartPeerMeal
-                      ? 'Registrar inicio de comida.'
-                      : 'No disponible ahora: valida turno, ausencia, descanso y actividad en curso.'),
-              trailing: OutlinedButton(
-                onPressed: _saving || (!isOnMeal && !canStartPeerMeal) ? null : () => _run(() async {
-                  final repository = ref.read(restaurantOpsRepositoryProvider);
-                  if (activeSessionId != null) {
-                    return repository.confirmMealReturn(
-                      branchId: widget.branchId,
-                      sessionId: activeSessionId,
-                      stateAfterReturn: 'available',
-                      declaredAt: _declaredMealAt,
-                    );
-                  }
-                  return repository.startMeal(
-                    branchId: widget.branchId,
-                    employeeId: employeeId,
-                    declaredAt: _declaredMealAt,
-                  );
-                }),
-                child: Text(isOnMeal ? 'Confirmar regreso' : 'Iniciar comida'),
-              ),
-            )),
-          );
-        }),
+      if (widget.workerFocus == null || widget.workerFocus == 'tasks') ...[
+        _SectionTitle(title: 'Mis tareas'),
+        if (ownTasks.isEmpty)
+          _InfoCard(text: 'No tienes tareas asignadas para este turno.'),
+        ...ownTasks.map(_taskCard),
       ],
-      _SectionTitle(title: 'Registrar actividad por un compañero'),
-      if (rows.isEmpty) _InfoCard(text: 'No hay actividades abiertas de compañeros para registrar en este momento.'),
-      ...rows.take(30).map((row) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: _SectionCard(child: ListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(row.label),
-          subtitle: Text('Responsable: ${row.task['assignee_name'] ?? 'Integrante asignado'} · El aviso no completa la tarea.'),
-          trailing: const Icon(Icons.chevron_right_rounded),
-          onTap: _saving ? null : () => _recordCoworkerTask(row.task, row.employeeId, partId: row.partId),
-        )),
-      )),
+      if (widget.workerFocus == null || widget.workerFocus == 'notices') ...[
+        _SectionTitle(title: 'Avisos para ayudar a un compañero'),
+        ...notices.maybeWhen(
+          data: (items) => items
+              .take(12)
+              .map((notice) {
+                final task = notice['task'] is Map<String, dynamic>
+                    ? notice['task'] as Map<String, dynamic>
+                    : const <String, dynamic>{};
+                final claimedByMe = notice['claimed_by'] == userId;
+                final claimedByOther =
+                    notice['claimed_by'] != null && !claimedByMe;
+                final claimedUntil = DateTime.tryParse(
+                  notice['claimed_until'] as String? ?? '',
+                );
+                final claimExpired =
+                    claimedByOther &&
+                    claimedUntil != null &&
+                    !claimedUntil.isAfter(DateTime.now());
+                final resolved = notice['status'] == 'resolved';
+                final cancelled = notice['status'] == 'cancelled';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _SectionCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '¿Puedes avisarle personalmente a un compañero?',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        if (task['name'] != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              '${task['name']} · ${task['scheduled_for'] ?? ''}',
+                            ),
+                          ),
+                        if (notice['resolution'] == 'not_located')
+                          const Text(
+                            'La persona anterior no pudo localizarlo; el aviso está disponible de nuevo.',
+                          ),
+                        if (resolved)
+                          const Text(
+                            'Aviso resuelto. La tarea sigue pendiente hasta registrarse y verificarse.',
+                          ),
+                        if (cancelled)
+                          const Text(
+                            'Aviso cancelado: el responsable confirmó la recepción de la tarea.',
+                          ),
+                        if (claimedByOther && !claimExpired)
+                          const Text(
+                            'Otro compañero reservó este aviso; la reserva vence según la política de la sucursal.',
+                          ),
+                        if (claimExpired)
+                          const Text(
+                            'La reserva venció; puedes intentar atender el aviso.',
+                          ),
+                        if (!resolved &&
+                            !cancelled &&
+                            (!claimedByOther || claimExpired))
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                if (!claimedByMe)
+                                  OutlinedButton(
+                                    onPressed: _saving
+                                        ? null
+                                        : () => _run(
+                                            () => ref
+                                                .read(
+                                                  restaurantOpsRepositoryProvider,
+                                                )
+                                                .claimCollaborativeNotice(
+                                                  branchId: widget.branchId,
+                                                  requestId:
+                                                      notice['id'] as String,
+                                                ),
+                                          ),
+                                    child: const Text('Voy a avisarle'),
+                                  ),
+                                if (claimedByMe)
+                                  FilledButton(
+                                    onPressed: _saving
+                                        ? null
+                                        : () => _run(
+                                            () => ref
+                                                .read(
+                                                  restaurantOpsRepositoryProvider,
+                                                )
+                                                .resolveCollaborativeNotice(
+                                                  branchId: widget.branchId,
+                                                  requestId:
+                                                      notice['id'] as String,
+                                                  resolution: 'peer_notified',
+                                                ),
+                                          ),
+                                    child: const Text('Ya le avisé'),
+                                  ),
+                                if (claimedByMe)
+                                  OutlinedButton(
+                                    onPressed: _saving
+                                        ? null
+                                        : () => _run(
+                                            () => ref
+                                                .read(
+                                                  restaurantOpsRepositoryProvider,
+                                                )
+                                                .resolveCollaborativeNotice(
+                                                  branchId: widget.branchId,
+                                                  requestId:
+                                                      notice['id'] as String,
+                                                  resolution: 'not_located',
+                                                ),
+                                          ),
+                                    child: const Text('No pude localizarlo'),
+                                  ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                );
+              })
+              .toList(growable: false),
+          orElse: () => const <Widget>[],
+        ),
+        if (notices.hasError)
+          _InfoCard(
+            text:
+                'No se pudieron cargar los avisos. Actualiza para reintentar.',
+          ),
+      ],
+      if (widget.workerFocus == null || widget.workerFocus == 'shift') ...[
+        if (approvedMealSlots.isNotEmpty)
+          _InfoCard(
+            text:
+                'Comida programada: ${approvedMealSlots.first['starts_at_local'] ?? ''}–${approvedMealSlots.first['scheduled_end_at_local'] ?? ''}. Horario aprobado; el inicio y el regreso se registran por separado.',
+          ),
+        _SectionTitle(title: 'Mi turno'),
+        _SectionCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                shifts.isEmpty
+                    ? 'No hay un horario publicado para hoy.'
+                    : shifts
+                          .map(
+                            (shift) =>
+                                '${shift['shift_date']} · ${shift['start_time']}–${shift['end_time']}',
+                          )
+                          .join('\n'),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Estado operativo: ${_operationalStateLabel(effectiveState)}',
+              ),
+              _declaredMealTimeControl(),
+              if (activeMeal != null) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'La comida continúa activa hasta confirmar el regreso.',
+                ),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    OutlinedButton(
+                      onPressed: _saving
+                          ? null
+                          : () => _run(
+                              () => ref
+                                  .read(restaurantOpsRepositoryProvider)
+                                  .confirmMealReturn(
+                                    branchId: widget.branchId,
+                                    sessionId: activeMeal['id'] as String,
+                                    stateAfterReturn: 'available',
+                                    declaredAt: _declaredMealAt,
+                                  ),
+                            ),
+                      child: const Text('Regresé disponible'),
+                    ),
+                    OutlinedButton(
+                      onPressed: _saving
+                          ? null
+                          : () => _run(
+                              () => ref
+                                  .read(restaurantOpsRepositoryProvider)
+                                  .confirmMealReturn(
+                                    branchId: widget.branchId,
+                                    sessionId: activeMeal['id'] as String,
+                                    stateAfterReturn: 'busy',
+                                    declaredAt: _declaredMealAt,
+                                  ),
+                            ),
+                      child: const Text('Regresé ocupado'),
+                    ),
+                  ],
+                ),
+              ] else ...[
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    if (effectiveState != 'off_shift' &&
+                        effectiveState != 'rest' &&
+                        effectiveState != 'meal')
+                      FilledButton(
+                        onPressed:
+                            _saving ||
+                                (widget.data['branch']
+                                        as Map<
+                                          String,
+                                          dynamic
+                                        >?)?['meal_duration_minutes'] ==
+                                    null
+                            ? null
+                            : () => _run(
+                                () => ref
+                                    .read(restaurantOpsRepositoryProvider)
+                                    .startMeal(
+                                      branchId: widget.branchId,
+                                      declaredAt: _declaredMealAt,
+                                    ),
+                              ),
+                        child: const Text('Iniciar comida'),
+                      ),
+                    if (effectiveState == 'available')
+                      OutlinedButton(
+                        onPressed: _saving
+                            ? null
+                            : () => _run(
+                                () => ref
+                                    .read(restaurantOpsRepositoryProvider)
+                                    .setOperationalState(
+                                      branchId: widget.branchId,
+                                      state: 'occupied',
+                                    ),
+                              ),
+                        child: const Text('Estoy ocupado'),
+                      ),
+                    if (effectiveState == 'occupied')
+                      OutlinedButton(
+                        onPressed: _saving
+                            ? null
+                            : () => _run(
+                                () => ref
+                                    .read(restaurantOpsRepositoryProvider)
+                                    .setOperationalState(
+                                      branchId: widget.branchId,
+                                      state: 'available',
+                                    ),
+                              ),
+                        child: const Text('Estoy disponible'),
+                      ),
+                  ],
+                ),
+                if ((widget.data['branch']
+                        as Map<String, dynamic>?)?['meal_duration_minutes'] ==
+                    null)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: Text(
+                      'La sucursal aún no configuró la duración de comida.',
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+        if (canRecordPeerMeals && peerMealCandidates.isNotEmpty) ...[
+          _SectionTitle(title: 'Registrar comida por un compañero'),
+          const _InfoCard(
+            text:
+                'El regreso requiere confirmación explícita; el tiempo programado no cambia automáticamente el estado laboral.',
+          ),
+          ...peerMealCandidates.map((candidate) {
+            final employeeId = candidate['employee_id'] as String?;
+            if (employeeId == null) return const SizedBox.shrink();
+            final employee = shifts.firstWhere(
+              (shift) => shift['employee_id'] == employeeId,
+              orElse: () => const <String, dynamic>{},
+            );
+            final activeSessionId =
+                candidate['active_meal_session_id'] as String?;
+            final isOnMeal = activeSessionId != null;
+            final canStartPeerMeal = candidate['can_start_meal'] == true;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _SectionCard(
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(
+                    candidate['employee_name'] as String? ??
+                        employee['employee_name'] as String? ??
+                        'Compañero',
+                  ),
+                  subtitle: Text(
+                    isOnMeal
+                        ? 'Comida activa; registrar regreso confirmado.'
+                        : canStartPeerMeal
+                        ? 'Registrar inicio de comida.'
+                        : 'No disponible ahora: valida turno, ausencia, descanso y actividad en curso.',
+                  ),
+                  trailing: OutlinedButton(
+                    onPressed: _saving || (!isOnMeal && !canStartPeerMeal)
+                        ? null
+                        : () => _run(() async {
+                            final repository = ref.read(
+                              restaurantOpsRepositoryProvider,
+                            );
+                            if (activeSessionId != null) {
+                              return repository.confirmMealReturn(
+                                branchId: widget.branchId,
+                                sessionId: activeSessionId,
+                                stateAfterReturn: 'available',
+                                declaredAt: _declaredMealAt,
+                              );
+                            }
+                            return repository.startMeal(
+                              branchId: widget.branchId,
+                              employeeId: employeeId,
+                              declaredAt: _declaredMealAt,
+                            );
+                          }),
+                    child: Text(
+                      isOnMeal ? 'Confirmar regreso' : 'Iniciar comida',
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }),
+        ],
+      ],
+      if (widget.workerFocus == null || widget.workerFocus == 'record') ...[
+        _SectionTitle(title: 'Registrar actividad por un compañero'),
+        if (rows.isEmpty)
+          _InfoCard(
+            text:
+                'No hay actividades abiertas de compañeros para registrar en este momento.',
+          ),
+        ...rows
+            .take(30)
+            .map(
+              (row) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: _SectionCard(
+                  child: ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(row.label),
+                    subtitle: Text(
+                      'Responsable: ${row.task['assignee_name'] ?? 'Integrante asignado'} · El aviso no completa la tarea.',
+                    ),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: _saving
+                        ? null
+                        : () => _recordCoworkerTask(
+                            row.task,
+                            row.employeeId,
+                            partId: row.partId,
+                          ),
+                  ),
+                ),
+              ),
+            ),
+      ],
     ];
   }
 
@@ -1384,69 +1878,134 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     _ => 'Disponible',
   };
 
-  Future<void> _recordCoworkerTask(Map<String, dynamic> task, String employeeId, {String? partId}) async {
+  Future<void> _recordCoworkerTask(
+    Map<String, dynamic> task,
+    String employeeId, {
+    String? partId,
+  }) async {
     final now = DateTime.now();
-    final scheduledDate = DateTime.tryParse('${task['scheduled_for'] ?? ''}T00:00:00');
+    final scheduledDate = DateTime.tryParse(
+      '${task['scheduled_for'] ?? ''}T00:00:00',
+    );
     if (scheduledDate != null && scheduledDate.isAfter(now)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No se puede reportar como realizada una actividad programada para una fecha futura.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No se puede reportar como realizada una actividad programada para una fecha futura.',
+          ),
+        ),
+      );
       return;
     }
-    final pickedDate = await showDatePicker(context: context, initialDate: now, firstDate: scheduledDate ?? now.subtract(const Duration(days: 365)), lastDate: now);
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: scheduledDate ?? now.subtract(const Duration(days: 365)),
+      lastDate: now,
+    );
     if (pickedDate == null || !mounted) return;
-    final pickedTime = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(now));
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now),
+    );
     if (pickedTime == null || !mounted) return;
-    final declaredAt = DateTime(pickedDate.year, pickedDate.month, pickedDate.day, pickedTime.hour, pickedTime.minute);
-    final evidencePolicy = task['evidence_policy'] as String? ??
+    final declaredAt = DateTime(
+      pickedDate.year,
+      pickedDate.month,
+      pickedDate.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+    final evidencePolicy =
+        task['evidence_policy'] as String? ??
         (task['requires_evidence'] == true ? 'required' : 'none');
     String? evidencePath;
     if (evidencePolicy != 'none') {
-      final captured = await _captureTaskEvidence(task, partId: partId, mandatory: evidencePolicy == 'required');
+      final captured = await _captureTaskEvidence(
+        task,
+        partId: partId,
+        mandatory: evidencePolicy == 'required',
+      );
       if (!captured.$1 || !mounted) return;
       evidencePath = captured.$2;
     }
-    await _run(() => ref.read(restaurantOpsRepositoryProvider).recordTaskReport(
-      branchId: widget.branchId, taskId: task['id'] as String, partId: partId,
-      responsibleEmployeeId: employeeId, declaredCompletedAt: declaredAt, evidencePath: evidencePath,
-    ));
+    await _run(
+      () => ref
+          .read(restaurantOpsRepositoryProvider)
+          .recordTaskReport(
+            branchId: widget.branchId,
+            taskId: task['id'] as String,
+            partId: partId,
+            responsibleEmployeeId: employeeId,
+            declaredCompletedAt: declaredAt,
+            evidencePath: evidencePath,
+          ),
+    );
   }
 
-  Future<(bool, String?)> _captureTaskEvidence(Map<String, dynamic> task,
-      {String? partId, required bool mandatory}) async {
+  Future<(bool, String?)> _captureTaskEvidence(
+    Map<String, dynamic> task, {
+    String? partId,
+    required bool mandatory,
+  }) async {
     var shouldCapture = mandatory;
     if (!mandatory) {
-      shouldCapture = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const Text('Evidencia fotográfica'),
-          content: const Text('¿Quieres adjuntar una fotografía a este registro? Es opcional.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Continuar sin foto')),
-            FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Tomar foto')),
-          ],
-        ),
-      ) ?? false;
+      shouldCapture =
+          await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Evidencia fotográfica'),
+              content: const Text(
+                '¿Quieres adjuntar una fotografía a este registro? Es opcional.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Continuar sin foto'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Tomar foto'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
       if (!shouldCapture) return (true, null);
     }
     final path = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const RestaurantEvidenceCaptureScreen()),
+      MaterialPageRoute(
+        builder: (_) => const RestaurantEvidenceCaptureScreen(),
+      ),
     );
     if (path == null || !mounted) return (false, null);
     try {
-      final uploaded = await ref.read(restaurantOpsRepositoryProvider).uploadEvidence(
-        branchId: widget.branchId, taskId: task['id'] as String, partId: partId, filePath: path,
-      );
+      final uploaded = await ref
+          .read(restaurantOpsRepositoryProvider)
+          .uploadEvidence(
+            branchId: widget.branchId,
+            taskId: task['id'] as String,
+            partId: partId,
+            filePath: path,
+          );
       return (true, uploaded);
     } on Object catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString())));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
       return (false, null);
     }
   }
 
   Future<void> _openTaskReportEvidence(Map<String, dynamic> report) async {
     try {
-      final url = await ref.read(restaurantOpsRepositoryProvider).getTaskReportEvidence(
-        branchId: widget.branchId, reportId: report['id'] as String,
-      );
+      final url = await ref
+          .read(restaurantOpsRepositoryProvider)
+          .getTaskReportEvidence(
+            branchId: widget.branchId,
+            reportId: report['id'] as String,
+          );
       if (!mounted) return;
       await showDialog<void>(
         context: context,
@@ -1454,14 +2013,27 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
           title: const Text('Evidencia de la actividad'),
           content: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 520, maxHeight: 520),
-            child: Image.network(url, fit: BoxFit.contain,
-              errorBuilder: (_, __, ___) => const Text('No se pudo cargar la evidencia. Solicita otra vez un enlace temporal.')),
+            child: Image.network(
+              url,
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => const Text(
+                'No se pudo cargar la evidencia. Solicita otra vez un enlace temporal.',
+              ),
+            ),
           ),
-          actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cerrar'))],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cerrar'),
+            ),
+          ],
         ),
       );
     } on Object catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.toString())));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
@@ -1470,11 +2042,24 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     final receipts = ref.watch(restaurantTaskReceiptsProvider(widget.branchId));
     final members = _maps(widget.data['members']);
-    final currentMember = members.where((member) => member['user_id'] == userId).toList(growable: false);
-    final canManage = currentMember.isNotEmpty && const {'admin', 'supervisor'}.contains(currentMember.first['access_role']);
+    final currentMember = members
+        .where((member) => member['user_id'] == userId)
+        .toList(growable: false);
+    final canManage =
+        currentMember.isNotEmpty &&
+        const {
+          'admin',
+          'supervisor',
+        }.contains(currentMember.first['access_role']);
     final receipt = receipts.maybeWhen(
       data: (items) {
-        final matches = items.where((item) => item['task_id'] == task['id'] && item['employee_id'] == task['assigned_to']).toList(growable: false);
+        final matches = items
+            .where(
+              (item) =>
+                  item['task_id'] == task['id'] &&
+                  item['employee_id'] == task['assigned_to'],
+            )
+            .toList(growable: false);
         return matches.isEmpty ? null : matches.first;
       },
       orElse: () => null,
@@ -1515,12 +2100,22 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
               padding: EdgeInsets.only(top: 8),
               child: Text(l10n.restaurantCalendarConfigurationPending),
             ),
-          if (receipt?['receipt_state'] == 'awaiting' && task['assigned_to'] == userId && userId != null)
+          if (receipt?['receipt_state'] == 'awaiting' &&
+              task['assigned_to'] == userId &&
+              userId != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
               child: OutlinedButton.icon(
-                onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-                  .confirmTaskReceipt(branchId: widget.branchId, taskId: task['id'] as String)),
+                onPressed: _saving
+                    ? null
+                    : () => _run(
+                        () => ref
+                            .read(restaurantOpsRepositoryProvider)
+                            .confirmTaskReceipt(
+                              branchId: widget.branchId,
+                              taskId: task['id'] as String,
+                            ),
+                      ),
                 icon: const Icon(Icons.mark_email_read_outlined),
                 label: const Text('Confirmar recepción'),
               ),
@@ -1529,8 +2124,16 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
             Padding(
               padding: const EdgeInsets.only(top: 8),
               child: OutlinedButton.icon(
-                onPressed: _saving ? null : () => _run(() => ref.read(restaurantOpsRepositoryProvider)
-                  .requestCollaborativeNotice(branchId: widget.branchId, taskId: task['id'] as String)),
+                onPressed: _saving
+                    ? null
+                    : () => _run(
+                        () => ref
+                            .read(restaurantOpsRepositoryProvider)
+                            .requestCollaborativeNotice(
+                              branchId: widget.branchId,
+                              taskId: task['id'] as String,
+                            ),
+                      ),
                 icon: const Icon(Icons.campaign_outlined),
                 label: const Text('Solicitar aviso a un compañero'),
               ),
@@ -1609,20 +2212,27 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
       action = 'start';
       label = l10n.restaurantOpsActionStart;
     } else if (assignee == userId && status == 'in_progress') {
-      final evidencePolicy = task['evidence_policy'] as String? ??
+      final evidencePolicy =
+          task['evidence_policy'] as String? ??
           (task['requires_evidence'] == true ? 'required' : 'none');
       if (evidencePolicy == 'independent_review' && userId != null) {
         return Row(
           children: [
-            Expanded(child: _ActionButton(
-              label: l10n.restaurantOpsActionPause,
-              onPressed: () => _taskAction(task, 'pause', partId: partId),
-            )),
+            Expanded(
+              child: _ActionButton(
+                label: l10n.restaurantOpsActionPause,
+                onPressed: () => _taskAction(task, 'pause', partId: partId),
+              ),
+            ),
             const SizedBox(width: 8),
-            Expanded(child: OutlinedButton(
-              onPressed: _saving ? null : () => _recordCoworkerTask(task, userId, partId: partId),
-              child: const Text('Enviar a validación'),
-            )),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _saving
+                    ? null
+                    : () => _recordCoworkerTask(task, userId, partId: partId),
+                child: const Text('Enviar a validación'),
+              ),
+            ),
           ],
         );
       }
@@ -2050,7 +2660,8 @@ class _RestaurantSectionState extends ConsumerState<_RestaurantSection> {
                   key: ValueKey(incident['id']),
                   incident: incident,
                   members: members,
-                  busy: _saving ||
+                  busy:
+                      _saving ||
                       incident['_pending_sync'] == true ||
                       incident['_sync_needs_attention'] == true,
                   onSave: (status, assignedTo, blocking, note) => _run(
