@@ -320,9 +320,6 @@ class AppLocalizationsTh extends AppLocalizations {
       'เปิดการแจ้งเตือนไม่สำเร็จ โปรดตรวจสอบสิทธิ์การแจ้งเตือนของโทรศัพท์และการตั้งค่า Firebase';
 
   @override
-  String get restaurantNotificationView => 'ดู';
-
-  @override
   String get restaurantSignOutPendingEvents =>
       'เหตุการณ์ที่รอซิงค์ยังคงอยู่ในโทรศัพท์นี้';
 
@@ -1602,4 +1599,7 @@ class AppLocalizationsTh extends AppLocalizations {
 
   @override
   String get restaurantOpsBranchCreating => 'กำลังสร้าง…';
+
+  @override
+  String get restaurantNotificationView => 'ดู';
 }

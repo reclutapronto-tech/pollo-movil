@@ -301,9 +301,6 @@ class AppLocalizationsZh extends AppLocalizations {
       '无法启用通知。请检查此手机的通知权限和 Firebase 移动端配置。';
 
   @override
-  String get restaurantNotificationView => '查看';
-
-  @override
   String get restaurantSignOutPendingEvents => '等待同步的事件仍保留在此手机上。';
 
   @override
@@ -1507,4 +1504,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get restaurantOpsBranchCreating => '正在创建…';
+
+  @override
+  String get restaurantNotificationView => '查看';
 }

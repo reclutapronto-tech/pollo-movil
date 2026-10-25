@@ -323,9 +323,6 @@ class AppLocalizationsEs extends AppLocalizations {
       'No se pudieron activar las notificaciones. Revisa el permiso del teléfono y la configuración móvil de Firebase.';
 
   @override
-  String get restaurantNotificationView => 'Ver';
-
-  @override
   String get restaurantSignOutPendingEvents =>
       'Los eventos guardados para sincronizar permanecen en este teléfono.';
 
@@ -1699,4 +1696,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get restaurantOpsBranchCreating => 'Creando…';
+
+  @override
+  String get restaurantNotificationView => 'Ver';
 }

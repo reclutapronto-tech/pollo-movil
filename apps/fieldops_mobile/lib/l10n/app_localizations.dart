@@ -392,7 +392,10 @@ abstract class AppLocalizations {
   /// **'Location permission is required because this branch enabled it for the time clock.'**
   String get restaurantClockGpsPermissionRequired;
 
-  /// User-facing error when the device cannot obtain a one-time clock location.
+  /// No description provided for @restaurantClockGpsLocationUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t get your location. Check location services and try again.'**
   String get restaurantClockGpsLocationUnavailable;
 
   /// No description provided for @restaurantClockQueued.
@@ -622,7 +625,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Could not enable notifications. Check this phone\'s notification permission and the Firebase mobile configuration.'**
   String get restaurantPushEnableFailed;
-  String get restaurantNotificationView;
 
   /// No description provided for @restaurantSignOutPendingEvents.
   ///
@@ -2799,6 +2801,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Creating…'**
   String get restaurantOpsBranchCreating;
+
+  /// No description provided for @restaurantNotificationView.
+  ///
+  /// In en, this message translates to:
+  /// **'View'**
+  String get restaurantNotificationView;
 }
 
 class _AppLocalizationsDelegate
