@@ -1,15 +1,16 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Workers', () => {
-  test('should show search input', async ({ page }) => {
+  test('worker search stays private before sign-in', async ({ page }) => {
     await page.goto('/workers');
-    const search = page.locator('input[placeholder*="earch"]');
-    await expect(search).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#email')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('input[placeholder*="earch"], input[placeholder*="uscar"]')).toHaveCount(0);
   });
 
-  test('should have CSV export button', async ({ page }) => {
+  test('worker export controls stay private before sign-in', async ({ page }) => {
     await page.goto('/workers');
     const exportBtn = page.locator('button:has-text("CSV"), button:has-text("Export")');
-    await expect(exportBtn).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#email')).toBeVisible({ timeout: 10000 });
+    await expect(exportBtn).toHaveCount(0);
   });
 });

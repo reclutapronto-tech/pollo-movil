@@ -1030,7 +1030,7 @@ USING (user_id = auth.uid());
 
 -- ========================================================
 -- 2. schedule_shifts write policies
---    Supervisors and admins can INSERT/UPDATE/DELETE.
+--    Supervisors, admins, and owners can INSERT/UPDATE/DELETE.
 --    Workers can only SELECT (already covered by tenant isolation policy).
 -- ========================================================
 
@@ -1039,7 +1039,7 @@ ON schedule_shifts
 FOR INSERT
 WITH CHECK (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
   AND created_by = auth.uid()
 );
 
@@ -1048,11 +1048,11 @@ ON schedule_shifts
 FOR UPDATE
 USING (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
 )
 WITH CHECK (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
 );
 
 CREATE POLICY "Supervisor schedule delete"
@@ -1060,13 +1060,13 @@ ON schedule_shifts
 FOR DELETE
 USING (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
   AND status = 'draft'  -- cannot delete published shifts
 );
 
 -- ========================================================
 -- 3. expense_events UPDATE policy (approval workflow)
---    Only supervisors/admins for the same company can update
+--    Only supervisors/admins/owners for the same company can update
 --    (approve/deny/reimburse). Workers cannot modify their own decisions.
 -- ========================================================
 
@@ -1075,12 +1075,12 @@ ON expense_events
 FOR UPDATE
 USING (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
   AND submitted_by != auth.uid()  -- cannot approve own expense
 )
 WITH CHECK (
   company_id = public.current_company_id()
-  AND public.current_user_role() IN ('supervisor', 'admin')
+  AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
   AND submitted_by != auth.uid()
 );
 
@@ -1175,12 +1175,12 @@ CREATE POLICY "Worker PTO cancel"
     )
     WITH CHECK (status = 'cancelled');
 
--- Supervisors/admins can approve or deny
+-- Supervisors/admins/owners can approve or deny
 CREATE POLICY "Supervisor PTO decision"
     ON pto_requests FOR UPDATE
     USING (
         company_id = public.current_company_id()
-        AND public.current_user_role() IN ('supervisor', 'admin')
+        AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
         AND status = 'pending'
     )
     WITH CHECK (
@@ -1204,15 +1204,11 @@ ALTER TABLE companies ADD COLUMN IF NOT EXISTS stripe_customer_id text;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS payment_status text NOT NULL DEFAULT 'trialing';
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_data_uri text;
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS settings_version int NOT NULL DEFAULT 1;
-ALTER TABLE companies ADD COLUMN IF NOT EXISTS billing_mode text NOT NULL DEFAULT 'demo';
 
 -- Constraint: payment_status values
 ALTER TABLE companies DROP CONSTRAINT IF EXISTS chk_payment_status;
 ALTER TABLE companies ADD CONSTRAINT chk_payment_status
   CHECK (payment_status IN ('trialing', 'active', 'past_due', 'cancelled'));
-ALTER TABLE companies DROP CONSTRAINT IF EXISTS chk_billing_mode;
-ALTER TABLE companies ADD CONSTRAINT chk_billing_mode
-  CHECK (billing_mode IN ('demo', 'stripe'));
 
 -- ─── 2. Admin UPDATE policies for companies and users ───────
 
@@ -1222,7 +1218,8 @@ CREATE POLICY "Admin company update"
   USING (id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin'))
   WITH CHECK (id = public.current_company_id());
 
--- Company owner/admin can update users within their company
+-- Company owner/admin can update users within their company.
+-- Admins cannot modify owner rows or promote users to owner.
 CREATE POLICY "Admin user update"
   ON users FOR UPDATE
   USING (
@@ -1354,22 +1351,22 @@ CREATE POLICY "Company logo read"
     AND (storage.foldername(name))[1]::uuid = public.current_company_id()
   );
 
--- Write: only admin can upload/overwrite
+-- Write: only owner/admin can upload/overwrite
 CREATE POLICY "Admin logo upload"
   ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (
     bucket_id = 'company-logos'
     AND (storage.foldername(name))[1]::uuid = public.current_company_id()
-    AND public.current_user_role() = 'admin'
+    AND public.current_user_role() IN ('owner', 'admin')
   );
 
--- Delete: only admin
+-- Delete: only owner/admin
 CREATE POLICY "Admin logo delete"
   ON storage.objects FOR DELETE TO authenticated
   USING (
     bucket_id = 'company-logos'
     AND (storage.foldername(name))[1]::uuid = public.current_company_id()
-    AND public.current_user_role() = 'admin'
+    AND public.current_user_role() IN ('owner', 'admin')
   );
 
 -- ─── 10. Set default company settings for existing companies ─
@@ -1683,14 +1680,14 @@ CREATE POLICY device_tokens_own_update ON public.device_tokens
   FOR UPDATE USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
 
--- Supervisors/admins can read tokens for their company
+-- Supervisors/admins/owners can read tokens for their company
 CREATE POLICY device_tokens_supervisor_read ON public.device_tokens
   FOR SELECT USING (
     company_id IN (
       SELECT (u.raw_user_meta_data->>'company_id')::uuid
       FROM auth.users u
       WHERE u.id = auth.uid()
-        AND (u.raw_user_meta_data->>'role') IN ('supervisor', 'admin')
+        AND (u.raw_user_meta_data->>'role') IN ('supervisor', 'admin', 'owner')
     )
   );
 
@@ -1759,7 +1756,7 @@ CREATE POLICY "Platform admins manage feature flags"
     )
   );
 
--- company_feature_overrides: company users can read their own, admins can manage
+-- company_feature_overrides: company users can read their own, owners/admins can manage
 CREATE POLICY "Company users read their overrides"
   ON company_feature_overrides FOR SELECT
   USING (company_id = public.current_company_id());
@@ -1768,11 +1765,11 @@ CREATE POLICY "Company admins manage overrides"
   ON company_feature_overrides FOR ALL
   USING (
     company_id = public.current_company_id()
-    AND public.current_user_role() = 'admin'
+    AND public.current_user_role() IN ('owner', 'admin')
   )
   WITH CHECK (
     company_id = public.current_company_id()
-    AND public.current_user_role() = 'admin'
+    AND public.current_user_role() IN ('owner', 'admin')
   );
 
 -- 4. Helper function
@@ -1842,7 +1839,7 @@ USING (
   AND EXISTS (
     SELECT 1 FROM users
     WHERE users.id = auth.uid()
-    AND users.role IN ('supervisor', 'admin')
+    AND users.role IN ('supervisor', 'admin', 'owner')
   )
 )
 WITH CHECK (
@@ -1850,6 +1847,7 @@ WITH CHECK (
   AND EXISTS (
     SELECT 1 FROM users
     WHERE users.id = auth.uid()
+    AND users.role IN ('supervisor', 'admin', 'owner')
   )
 );
 
@@ -2000,7 +1998,7 @@ USING (
   AND (worker_id = auth.uid() OR created_by = auth.uid())
 );
 
--- Supervisors/admins can view all corrections for their company
+-- Supervisors/admins/owners can view all corrections for their company
 CREATE POLICY "Supervisors can view company time_corrections"
 ON time_corrections
 FOR SELECT
@@ -2009,11 +2007,11 @@ USING (
   AND EXISTS (
     SELECT 1 FROM users
     WHERE users.id = auth.uid()
-    AND users.role IN ('supervisor', 'admin', 'foreman')
+    AND users.role IN ('supervisor', 'admin', 'owner', 'foreman')
   )
 );
 
--- Supervisors/admins can create corrections
+-- Supervisors/admins/owners can create corrections
 CREATE POLICY "Supervisors can create time_corrections"
 ON time_corrections
 FOR INSERT
@@ -2022,11 +2020,11 @@ WITH CHECK (
   AND EXISTS (
     SELECT 1 FROM users
     WHERE users.id = auth.uid()
-    AND users.role IN ('supervisor', 'admin', 'foreman')
+    AND users.role IN ('supervisor', 'admin', 'owner', 'foreman')
   )
 );
 
--- Only supervisors/admins can update (approve/deny)
+-- Only supervisors/admins/owners can update (approve/deny)
 CREATE POLICY "Supervisors can update time_corrections"
 ON time_corrections
 FOR UPDATE
@@ -2035,7 +2033,7 @@ USING (
   AND EXISTS (
     SELECT 1 FROM users
     WHERE users.id = auth.uid()
-    AND users.role IN ('supervisor', 'admin')
+    AND users.role IN ('supervisor', 'admin', 'owner')
   )
 );
 
@@ -2144,6 +2142,5865 @@ ALTER FUNCTION public.enqueue_job(p_type text, p_payload jsonb, p_delay interval
 ALTER FUNCTION public.claim_next_job(p_types text[])                SET search_path = public;
 ALTER FUNCTION public.complete_job(p_id uuid, p_error text)         SET search_path = public;
 -- <<< END MIGRATION: 20260410000000_advisor_hardening.sql
+
+-- >>> BEGIN MIGRATION: 20260410000001_jobs_write_policy.sql
+-- =========================================================
+-- Migration: 20260410000001_jobs_write_policy
+-- Purpose:
+--   Add INSERT / UPDATE / DELETE policies for the jobs table
+--   so that company admins and supervisors can manage jobs
+--   directly from the client (e.g. the onboarding wizard and
+--   the jobs management UI).
+--
+--   Without these policies the table is default-deny for
+--   authenticated users — all writes from the web/mobile
+--   client silently fail.
+-- =========================================================
+
+-- Owners, admins, and supervisors can create jobs for their company.
+CREATE POLICY "Admin/supervisor can insert jobs"
+ON jobs
+FOR INSERT
+WITH CHECK (
+  company_id = public.current_company_id()
+  AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+);
+
+-- Owners, admins, and supervisors can update jobs for their company.
+CREATE POLICY "Admin/supervisor can update jobs"
+ON jobs
+FOR UPDATE
+USING (company_id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin', 'supervisor'))
+WITH CHECK (company_id = public.current_company_id());
+
+-- Only owners/admins can delete (soft-delete via deleted_at) jobs.
+CREATE POLICY "Admin can delete jobs"
+ON jobs
+FOR DELETE
+USING (company_id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin'));
+-- <<< END MIGRATION: 20260410000001_jobs_write_policy.sql
+
+-- >>> BEGIN MIGRATION: 20260410010000_company_billing_and_ownership.sql
+-- =========================================================
+-- Migration: 20260410010000_company_billing_and_ownership
+-- Purpose:
+--   1. Add Stripe subscription metadata to companies.
+--   2. Add explicit tenant billing contact and plan state.
+-- =========================================================
+
+ALTER TABLE public.companies
+  ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
+
+ALTER TABLE public.companies
+  ADD COLUMN IF NOT EXISTS billing_email text;
+
+ALTER TABLE public.companies
+  ADD COLUMN IF NOT EXISTS billing_plan text NOT NULL DEFAULT 'starter';
+
+ALTER TABLE public.companies
+  DROP CONSTRAINT IF EXISTS chk_billing_plan;
+
+ALTER TABLE public.companies
+  ADD CONSTRAINT chk_billing_plan
+  CHECK (billing_plan IN ('starter', 'pro', 'business', 'enterprise'));
+
+UPDATE public.companies
+SET billing_email = COALESCE(billing_email, email)
+WHERE billing_email IS NULL;
+-- <<< END MIGRATION: 20260410010000_company_billing_and_ownership.sql
+
+-- >>> BEGIN MIGRATION: 20260411010000_owner_role_and_demo_billing.sql
+-- =========================================================
+-- Migration: 20260411010000_owner_role_and_demo_billing (Part 1 of 2)
+-- Purpose:
+--   1. Introduce a first-class tenant owner role for existing projects.
+--   2. Add demo billing mode so billing pages work before Stripe is live.
+-- NOTE: RLS policies that reference the new 'owner' enum value are in
+--       20260411020000_owner_role_policies.sql — ALTER TYPE ADD VALUE
+--       cannot be used in the same transaction as policies that reference it.
+-- =========================================================
+
+ALTER TYPE public.user_role ADD VALUE IF NOT EXISTS 'owner' BEFORE 'admin';
+
+ALTER TABLE public.companies
+  ADD COLUMN IF NOT EXISTS billing_mode text NOT NULL DEFAULT 'demo';
+
+ALTER TABLE public.companies
+  DROP CONSTRAINT IF EXISTS chk_billing_mode;
+
+ALTER TABLE public.companies
+  ADD CONSTRAINT chk_billing_mode
+  CHECK (billing_mode IN ('demo', 'stripe'));
+
+UPDATE public.companies
+SET billing_mode = 'demo'
+WHERE billing_mode IS NULL;
+-- <<< END MIGRATION: 20260411010000_owner_role_and_demo_billing.sql
+
+-- >>> BEGIN MIGRATION: 20260411020000_owner_role_policies.sql
+-- =========================================================
+-- Migration: 20260411020000_owner_role_policies (Part 2 of 2)
+-- Purpose:
+--   Rebuild RLS policies so owners inherit admin-level company control.
+--   Must run in a separate transaction from 20260411010000 because
+--   PostgreSQL forbids using a newly-added enum value in the same
+--   transaction as the ALTER TYPE ADD VALUE statement.
+-- =========================================================
+
+DROP POLICY IF EXISTS "Admin company update" ON public.companies;
+CREATE POLICY "Admin company update"
+  ON public.companies FOR UPDATE
+  USING (id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin'))
+  WITH CHECK (id = public.current_company_id());
+
+DROP POLICY IF EXISTS "Admin user update" ON public.users;
+CREATE POLICY "Admin user update"
+  ON public.users FOR UPDATE
+  USING (
+    company_id = public.current_company_id()
+    AND (
+      public.current_user_role() = 'owner'
+      OR (public.current_user_role() = 'admin' AND role <> 'owner')
+    )
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND (
+      public.current_user_role() = 'owner'
+      OR (public.current_user_role() = 'admin' AND role <> 'owner')
+    )
+  );
+
+DROP POLICY IF EXISTS "Company admins manage overrides" ON public.company_feature_overrides;
+CREATE POLICY "Company admins manage overrides"
+  ON public.company_feature_overrides FOR ALL
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+
+DROP POLICY IF EXISTS "Admin/supervisor can insert jobs" ON public.jobs;
+CREATE POLICY "Admin/supervisor can insert jobs"
+  ON public.jobs FOR INSERT
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+  );
+
+DROP POLICY IF EXISTS "Admin/supervisor can update jobs" ON public.jobs;
+CREATE POLICY "Admin/supervisor can update jobs"
+  ON public.jobs FOR UPDATE
+  USING (company_id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin', 'supervisor'))
+  WITH CHECK (company_id = public.current_company_id());
+
+DROP POLICY IF EXISTS "Admin can delete jobs" ON public.jobs;
+CREATE POLICY "Admin can delete jobs"
+  ON public.jobs FOR DELETE
+  USING (company_id = public.current_company_id() AND public.current_user_role() IN ('owner', 'admin'));
+
+DROP POLICY IF EXISTS "Supervisor schedule insert" ON public.schedule_shifts;
+CREATE POLICY "Supervisor schedule insert"
+  ON public.schedule_shifts FOR INSERT
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+    AND created_by = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "Supervisor schedule update" ON public.schedule_shifts;
+CREATE POLICY "Supervisor schedule update"
+  ON public.schedule_shifts FOR UPDATE
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+  );
+
+DROP POLICY IF EXISTS "Supervisor schedule delete" ON public.schedule_shifts;
+CREATE POLICY "Supervisor schedule delete"
+  ON public.schedule_shifts FOR DELETE
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+    AND status = 'draft'
+  );
+
+DROP POLICY IF EXISTS "Supervisor expense approval update" ON public.expense_events;
+CREATE POLICY "Supervisor expense approval update"
+  ON public.expense_events FOR UPDATE
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+    AND submitted_by != auth.uid()
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+    AND submitted_by != auth.uid()
+  );
+
+DROP POLICY IF EXISTS "Supervisor PTO decision" ON public.pto_requests;
+CREATE POLICY "Supervisor PTO decision"
+  ON public.pto_requests FOR UPDATE
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+    AND status = 'pending'
+  )
+  WITH CHECK (
+    status IN ('approved', 'denied')
+    AND decided_by = auth.uid()
+  );
+
+DROP POLICY IF EXISTS "Supervisor/admin can manage job_budgets" ON public.job_budgets;
+CREATE POLICY "Supervisor/admin can manage job_budgets"
+  ON public.job_budgets FOR ALL
+  USING (
+    company_id = public.current_company_id()
+    AND EXISTS (
+      SELECT 1 FROM public.users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('supervisor', 'admin', 'owner')
+    )
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND EXISTS (
+      SELECT 1 FROM public.users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('supervisor', 'admin', 'owner')
+    )
+  );
+
+DROP POLICY IF EXISTS "Supervisors can view company time_corrections" ON public.time_corrections;
+CREATE POLICY "Supervisors can view company time_corrections"
+  ON public.time_corrections FOR SELECT
+  USING (
+    company_id = public.current_company_id()
+    AND EXISTS (
+      SELECT 1 FROM public.users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('supervisor', 'admin', 'owner', 'foreman')
+    )
+  );
+
+DROP POLICY IF EXISTS "Supervisors can create time_corrections" ON public.time_corrections;
+CREATE POLICY "Supervisors can create time_corrections"
+  ON public.time_corrections FOR INSERT
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND EXISTS (
+      SELECT 1 FROM public.users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('supervisor', 'admin', 'owner', 'foreman')
+    )
+  );
+
+DROP POLICY IF EXISTS "Supervisors can update time_corrections" ON public.time_corrections;
+CREATE POLICY "Supervisors can update time_corrections"
+  ON public.time_corrections FOR UPDATE
+  USING (
+    company_id = public.current_company_id()
+    AND EXISTS (
+      SELECT 1 FROM public.users
+      WHERE users.id = auth.uid()
+      AND users.role IN ('supervisor', 'admin', 'owner')
+    )
+  );
+
+DROP POLICY IF EXISTS "Admin logo upload" ON storage.objects;
+CREATE POLICY "Admin logo upload"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'company-logos'
+    AND (storage.foldername(name))[1]::uuid = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+
+DROP POLICY IF EXISTS "Admin logo delete" ON storage.objects;
+CREATE POLICY "Admin logo delete"
+  ON storage.objects FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'company-logos'
+    AND (storage.foldername(name))[1]::uuid = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+-- <<< END MIGRATION: 20260411020000_owner_role_policies.sql
+
+-- >>> BEGIN MIGRATION: 20260418000000_rls_gaps_and_auth_trigger.sql
+-- Migration: fill RLS gaps and add auth trigger for auto user profile creation
+
+-- media_assets INSERT: any authenticated user within their company can upload
+CREATE POLICY "Worker media asset insert"
+ON public.media_assets FOR INSERT
+TO authenticated
+WITH CHECK (
+  uploaded_by = auth.uid()
+  AND current_company_id() IS NOT NULL
+);
+
+-- assignments write: supervisors and above can manage assignments
+CREATE POLICY "Supervisor assignment insert"
+ON public.assignments FOR INSERT
+TO authenticated
+WITH CHECK (
+  current_user_role() IN ('owner','admin','supervisor','foreman')
+  AND company_id = current_company_id()
+);
+
+CREATE POLICY "Supervisor assignment update"
+ON public.assignments FOR UPDATE
+TO authenticated
+USING (
+  current_user_role() IN ('owner','admin','supervisor','foreman')
+  AND company_id = current_company_id()
+);
+
+CREATE POLICY "Supervisor assignment delete"
+ON public.assignments FOR DELETE
+TO authenticated
+USING (
+  current_user_role() IN ('owner','admin','supervisor','foreman')
+  AND company_id = current_company_id()
+);
+
+-- tasks write: supervisors+ insert/update, admins+ delete
+CREATE POLICY "Admin task insert"
+ON public.tasks FOR INSERT
+TO authenticated
+WITH CHECK (
+  current_user_role() IN ('owner','admin','supervisor')
+  AND company_id = current_company_id()
+);
+
+CREATE POLICY "Admin task update"
+ON public.tasks FOR UPDATE
+TO authenticated
+USING (
+  current_user_role() IN ('owner','admin','supervisor')
+  AND company_id = current_company_id()
+);
+
+CREATE POLICY "Admin task delete"
+ON public.tasks FOR DELETE
+TO authenticated
+USING (
+  current_user_role() IN ('owner','admin')
+  AND company_id = current_company_id()
+);
+
+-- admin_audit_log: admins and owners read-only
+CREATE POLICY "Admin audit log read"
+ON public.admin_audit_log FOR SELECT
+TO authenticated
+USING (
+  current_user_role() IN ('owner','admin')
+  AND company_id = current_company_id()
+);
+
+-- service-only tables: deny all direct authenticated access
+CREATE POLICY "No direct user access to background_jobs"
+ON public.background_jobs FOR ALL
+TO authenticated
+USING (false);
+
+CREATE POLICY "No direct user access to ingest_event_keys"
+ON public.ingest_event_keys FOR ALL
+TO authenticated
+USING (false);
+
+CREATE POLICY "No direct user access to platform_admins"
+ON public.platform_admins FOR ALL
+TO authenticated
+USING (false);
+
+CREATE POLICY "No direct user access to platform_admin_invites"
+ON public.platform_admin_invites FOR ALL
+TO authenticated
+USING (false);
+
+-- Auth trigger: auto-create public.users profile on new signup
+-- Only fires when company_id and role are present in user metadata (admin-provisioned)
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_company_id uuid;
+  v_role user_role;
+  v_full_name text;
+BEGIN
+  v_company_id := (NEW.raw_user_meta_data->>'company_id')::uuid;
+  v_role := (NEW.raw_user_meta_data->>'role')::user_role;
+  v_full_name := COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1));
+
+  IF v_company_id IS NOT NULL AND v_role IS NOT NULL THEN
+    INSERT INTO public.users (id, company_id, role, full_name, email, is_active)
+    VALUES (NEW.id, v_company_id, v_role, v_full_name, NEW.email, true)
+    ON CONFLICT (id) DO NOTHING;
+  END IF;
+
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+-- <<< END MIGRATION: 20260418000000_rls_gaps_and_auth_trigger.sql
+
+-- >>> BEGIN MIGRATION: 20260418100000_client_portal_tokens.sql
+-- Client portal: shareable read-only job links for clients
+
+CREATE TABLE IF NOT EXISTS public.job_share_tokens (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  token         uuid UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+  job_id        uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
+  company_id    uuid NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  created_by    uuid NOT NULL REFERENCES public.users(id),
+  label         text,                        -- optional note (e.g. "Client ABC")
+  expires_at    timestamptz,                 -- null = never expires
+  revoked_at    timestamptz,                 -- null = active
+  view_count    integer NOT NULL DEFAULT 0,
+  last_viewed_at timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS job_share_tokens_token_idx ON public.job_share_tokens(token);
+CREATE INDEX IF NOT EXISTS job_share_tokens_job_id_idx ON public.job_share_tokens(job_id);
+CREATE INDEX IF NOT EXISTS job_share_tokens_company_id_idx ON public.job_share_tokens(company_id);
+
+-- Enable RLS
+ALTER TABLE public.job_share_tokens ENABLE ROW LEVEL SECURITY;
+
+-- Supervisors and above can manage tokens for their company
+CREATE POLICY "Supervisor can manage share tokens"
+ON public.job_share_tokens
+FOR ALL
+TO authenticated
+USING (
+  company_id = current_company_id()
+  AND current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+)
+WITH CHECK (
+  company_id = current_company_id()
+  AND current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+);
+-- <<< END MIGRATION: 20260418100000_client_portal_tokens.sql
+
+-- >>> BEGIN MIGRATION: 20260419100000_safety_swap_and_sort_order.sql
+-- ========================================================
+-- Migration: 20260419100000_safety_swap_and_sort_order
+-- Purpose:
+--   1. Create public.safety_checklists      (immutable audit of pre-shift safety Q&A)
+--   2. Create public.shift_swap_requests    (worker-initiated shift swap workflow)
+--   3. Add schedule_shifts.sort_order       (foreman crew-view ordering)
+--
+-- Conventions:
+--   - RLS helpers public.current_company_id() / public.current_user_role()
+--     are defined in 20260403000003_rls_and_policies.sql.
+--   - Trigger function set_updated_at() is defined in 20260403000000_foundation_tables.sql.
+--   - user_role enum values: 'owner','admin','supervisor','foreman','worker'
+--     (20260403000000_foundation_tables.sql).
+--   - users.id === auth.uid() (FK to auth.users), so RLS uses auth.uid() directly.
+--   - Idempotent: CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS,
+--     CREATE INDEX IF NOT EXISTS. No destructive DDL. Safe to re-run.
+-- ========================================================
+
+-- ──────────────────────────────────────────────────────────────
+-- 1. safety_checklists — immutable pre-shift safety audit trail
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.safety_checklists (
+  id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id    uuid        NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  user_id       uuid        NOT NULL REFERENCES public.users(id)     ON DELETE CASCADE,
+  job_id        uuid        NOT NULL REFERENCES public.jobs(id)      ON DELETE CASCADE,
+  -- JSONB array of { question_id: uuid|text, answer: bool, answered_at: timestamptz }.
+  responses     jsonb       NOT NULL,
+  completed_at  timestamptz NOT NULL DEFAULT now(),
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT safety_checklists_responses_is_array CHECK (jsonb_typeof(responses) = 'array')
+);
+
+-- Company-wide supervisor/admin roll-ups ordered by recency.
+CREATE INDEX IF NOT EXISTS safety_checklists_company_completed_idx
+  ON public.safety_checklists (company_id, completed_at DESC);
+
+-- "Has this worker completed the checklist for this job today?" lookup.
+CREATE INDEX IF NOT EXISTS safety_checklists_user_job_completed_idx
+  ON public.safety_checklists (user_id, job_id, completed_at DESC);
+
+ALTER TABLE public.safety_checklists ENABLE ROW LEVEL SECURITY;
+
+-- Workers see their own completed checklists.
+CREATE POLICY "Worker sees own safety checklists"
+  ON public.safety_checklists
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND user_id = auth.uid()
+  );
+
+-- Supervisors / foremen / admins / owners see every checklist in their company.
+CREATE POLICY "Supervisors+ see company safety checklists"
+  ON public.safety_checklists
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  );
+
+-- Workers insert their own checklist — must match their auth.uid() and company.
+CREATE POLICY "Worker inserts own safety checklist"
+  ON public.safety_checklists
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND user_id = auth.uid()
+  );
+
+-- No UPDATE / DELETE policies are defined → RLS denies by default.
+-- Safety checklists are an immutable audit trail.
+
+GRANT SELECT, INSERT ON public.safety_checklists TO authenticated;
+
+-- ──────────────────────────────────────────────────────────────
+-- 2. shift_swap_requests — worker-initiated swap workflow
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.shift_swap_requests (
+  id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id         uuid        NOT NULL REFERENCES public.companies(id)        ON DELETE CASCADE,
+  shift_id           uuid        NOT NULL REFERENCES public.schedule_shifts(id)  ON DELETE CASCADE,
+  requester_id       uuid        NOT NULL REFERENCES public.users(id)            ON DELETE CASCADE,
+  swap_with_user_id  uuid        NULL     REFERENCES public.users(id)            ON DELETE SET NULL,
+  notes              text        NULL,
+  status             text        NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending', 'approved', 'denied', 'cancelled')),
+  decided_by         uuid        NULL     REFERENCES public.users(id),
+  decided_at         timestamptz NULL,
+  decision_reason    text        NULL,
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER trg_shift_swap_requests_updated_at
+BEFORE UPDATE ON public.shift_swap_requests
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Supervisor inbox: company pending queue ordered by age.
+CREATE INDEX IF NOT EXISTS shift_swap_requests_company_status_created_idx
+  ON public.shift_swap_requests (company_id, status, created_at DESC);
+
+-- Worker's own requests grouped by state.
+CREATE INDEX IF NOT EXISTS shift_swap_requests_requester_status_idx
+  ON public.shift_swap_requests (requester_id, status);
+
+ALTER TABLE public.shift_swap_requests ENABLE ROW LEVEL SECURITY;
+
+-- Requester sees their own swap requests.
+CREATE POLICY "Requester sees own swap requests"
+  ON public.shift_swap_requests
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND requester_id = auth.uid()
+  );
+
+-- Supervisors / foremen / admins / owners see all swap requests in their company.
+CREATE POLICY "Supervisors+ see company swap requests"
+  ON public.shift_swap_requests
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  );
+
+-- Requester inserts own swap request. Guard: the referenced shift must belong
+-- to this worker — prevents submitting swaps for someone else's shift.
+CREATE POLICY "Requester inserts own swap request"
+  ON public.shift_swap_requests
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND requester_id = auth.uid()
+    AND status = 'pending'
+    AND EXISTS (
+      SELECT 1
+      FROM public.schedule_shifts s
+      WHERE s.id = shift_swap_requests.shift_id
+        AND s.worker_id = auth.uid()
+        AND s.company_id = public.current_company_id()
+    )
+  );
+
+-- Supervisors+ decide (approve / deny) or cancel within their company.
+CREATE POLICY "Supervisors+ decide swap requests"
+  ON public.shift_swap_requests
+  FOR UPDATE
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  );
+
+GRANT SELECT, INSERT, UPDATE ON public.shift_swap_requests TO authenticated;
+
+-- ──────────────────────────────────────────────────────────────
+-- 3. schedule_shifts.sort_order — foreman crew-view ordering
+-- ──────────────────────────────────────────────────────────────
+ALTER TABLE public.schedule_shifts
+  ADD COLUMN IF NOT EXISTS sort_order integer NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS schedule_shifts_crew_order_idx
+  ON public.schedule_shifts (company_id, shift_date, sort_order);
+
+-- ========================================================
+-- Summary of changes (2026-04-19):
+--   1. Created public.safety_checklists
+--        - columns: id, company_id, user_id, job_id, responses (jsonb),
+--          completed_at, created_at
+--        - indexes: (company_id, completed_at DESC),
+--                   (user_id, job_id, completed_at DESC)
+--        - RLS: worker-SELECT-own, supervisor+-SELECT-all, worker-INSERT-own
+--        - immutable: no UPDATE / DELETE policies (denied by default)
+--        - GRANT SELECT, INSERT to authenticated
+--   2. Created public.shift_swap_requests
+--        - columns: id, company_id, shift_id, requester_id, swap_with_user_id,
+--          notes, status (pending/approved/denied/cancelled), decided_by,
+--          decided_at, decision_reason, created_at, updated_at
+--        - indexes: (company_id, status, created_at DESC),
+--                   (requester_id, status)
+--        - trigger: set_updated_at() on UPDATE
+--        - RLS: requester-SELECT-own, supervisor+-SELECT-all,
+--               requester-INSERT-own (shift must belong to them),
+--               supervisor+-UPDATE for decide/cancel
+--        - GRANT SELECT, INSERT, UPDATE to authenticated
+--   3. Added schedule_shifts.sort_order integer NOT NULL DEFAULT 0
+--        - new index schedule_shifts_crew_order_idx
+--          (company_id, shift_date, sort_order)
+-- ========================================================
+-- <<< END MIGRATION: 20260419100000_safety_swap_and_sort_order.sql
+
+-- >>> BEGIN MIGRATION: 20260419110000_pto_allocations.sql
+-- ========================================================
+-- Migration: 20260419110000_pto_allocations
+-- Purpose:
+--   Create public.pto_allocations — per-company, per-user, per-year,
+--   per-pto_type total-day allocations. Backs the pto edge function's
+--   `balance` action (replacing the hardcoded DEFAULT_ALLOCATIONS fallback)
+--   and the new `allocations_list` / `allocations_upsert` admin actions.
+--
+-- Conventions:
+--   - RLS helpers public.current_company_id() / public.current_user_role()
+--     are defined in 20260403000003_rls_and_policies.sql.
+--   - Trigger function set_updated_at() is defined in 20260403000000_foundation_tables.sql.
+--   - user_role enum values: 'owner','admin','supervisor','foreman','worker'
+--     (20260403000000_foundation_tables.sql).
+--   - users.id === auth.uid() (FK to auth.users), so RLS uses auth.uid() directly.
+--   - Idempotent: CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS.
+--     No destructive DDL. Safe to re-run.
+-- ========================================================
+
+-- ──────────────────────────────────────────────────────────────
+-- pto_allocations — per-worker PTO day totals by year & type
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.pto_allocations (
+  id          uuid          PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id  uuid          NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  user_id     uuid          NOT NULL REFERENCES public.users(id)     ON DELETE CASCADE,
+  pto_type    text          NOT NULL CHECK (pto_type IN ('vacation', 'sick', 'personal')),
+  year        int           NOT NULL,
+  total_days  numeric(6, 2) NOT NULL CHECK (total_days >= 0),
+  created_at  timestamptz   NOT NULL DEFAULT now(),
+  updated_at  timestamptz   NOT NULL DEFAULT now(),
+  UNIQUE (company_id, user_id, pto_type, year)
+);
+
+CREATE TRIGGER trg_pto_allocations_updated_at
+BEFORE UPDATE ON public.pto_allocations
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Admin roll-ups: all allocations for a company in a given year.
+CREATE INDEX IF NOT EXISTS pto_allocations_company_year_idx
+  ON public.pto_allocations (company_id, year);
+
+-- Worker balance lookup: all of a user's allocations for a given year.
+CREATE INDEX IF NOT EXISTS pto_allocations_user_year_idx
+  ON public.pto_allocations (user_id, year);
+
+ALTER TABLE public.pto_allocations ENABLE ROW LEVEL SECURITY;
+
+-- Workers see their own allocation rows.
+CREATE POLICY "Worker sees own pto allocations"
+  ON public.pto_allocations
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND user_id = auth.uid()
+  );
+
+-- Supervisors / foremen / admins / owners see every allocation in their company.
+CREATE POLICY "Supervisors+ see company pto allocations"
+  ON public.pto_allocations
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  );
+
+-- Admins / owners insert allocations (company-scoped).
+CREATE POLICY "Admins insert pto allocations"
+  ON public.pto_allocations
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+
+-- Admins / owners update allocations (company-scoped).
+CREATE POLICY "Admins update pto allocations"
+  ON public.pto_allocations
+  FOR UPDATE
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+
+-- Admins / owners delete allocations (company-scoped).
+CREATE POLICY "Admins delete pto allocations"
+  ON public.pto_allocations
+  FOR DELETE
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin')
+  );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pto_allocations TO authenticated;
+
+-- ========================================================
+-- Summary of changes (2026-04-19):
+--   1. Created public.pto_allocations
+--        - columns: id, company_id, user_id, pto_type (vacation/sick/personal),
+--          year, total_days numeric(6,2) >= 0, created_at, updated_at
+--        - unique: (company_id, user_id, pto_type, year)
+--        - indexes: (company_id, year), (user_id, year)
+--        - trigger: set_updated_at() on UPDATE
+--        - RLS: worker-SELECT-own, supervisor+-SELECT-all,
+--               admin/owner-INSERT/UPDATE/DELETE (company-scoped)
+--        - GRANT SELECT, INSERT, UPDATE, DELETE to authenticated
+-- ========================================================
+-- <<< END MIGRATION: 20260419110000_pto_allocations.sql
+
+-- >>> BEGIN MIGRATION: 20260420000000_photo_tags_and_galleries.sql
+-- Sprint 8.5 — Sharing Slice: photo tags, curated galleries, share-link extensions.
+--
+-- Adds:
+--   1. public.photo_tags          — free-form tags on media_assets (CompanyCam-parity)
+--   2. public.photo_galleries     — curated photo subsets with public share tokens
+--   3. public.photo_gallery_items — M:N between galleries and media_assets
+--   4. ALTER job_share_tokens     — password + branding toggle
+--
+-- RLS uses the existing helpers current_company_id() and current_user_role()
+-- (defined in foundation migrations). Public (unauth) access is NOT granted via
+-- RLS — public reads go through edge functions using the service-role key.
+
+-- ──────────────────────────────────────────────────────────────
+-- 1. photo_tags
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.photo_tags (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id      uuid NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  media_asset_id  uuid NOT NULL REFERENCES public.media_assets(id) ON DELETE CASCADE,
+  tag             text NOT NULL CHECK (length(trim(tag)) BETWEEN 1 AND 64),
+  created_by      uuid NOT NULL REFERENCES public.users(id),
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+-- One tag value per photo (case-insensitive).
+CREATE UNIQUE INDEX IF NOT EXISTS photo_tags_media_asset_tag_uidx
+  ON public.photo_tags (media_asset_id, lower(tag));
+
+-- Autocomplete / filter by tenant + tag.
+CREATE INDEX IF NOT EXISTS photo_tags_company_tag_idx
+  ON public.photo_tags (company_id, lower(tag));
+
+CREATE INDEX IF NOT EXISTS photo_tags_media_asset_idx
+  ON public.photo_tags (media_asset_id);
+
+ALTER TABLE public.photo_tags ENABLE ROW LEVEL SECURITY;
+
+-- Any authenticated company member can read / tag / untag. Matches CompanyCam
+-- UX: field workers are expected to tag their own photos without admin gate.
+CREATE POLICY "Company members can read photo tags"
+  ON public.photo_tags
+  FOR SELECT
+  TO authenticated
+  USING (company_id = public.current_company_id());
+
+CREATE POLICY "Company members can insert photo tags"
+  ON public.photo_tags
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND created_by = auth.uid()
+  );
+
+CREATE POLICY "Company members can delete photo tags"
+  ON public.photo_tags
+  FOR DELETE
+  TO authenticated
+  USING (company_id = public.current_company_id());
+
+-- ──────────────────────────────────────────────────────────────
+-- 2. photo_galleries
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.photo_galleries (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id       uuid NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  job_id           uuid NOT NULL REFERENCES public.jobs(id) ON DELETE CASCADE,
+  name             text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 160),
+  description      text,
+  share_token      uuid UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+  -- bcrypt hash; null = no password required
+  password_hash    text,
+  expires_at       timestamptz,
+  revoked_at       timestamptz,
+  view_count       integer NOT NULL DEFAULT 0,
+  last_viewed_at   timestamptz,
+  -- When true, public viewer composites tenant logo on each photo.
+  brand_watermark  boolean NOT NULL DEFAULT true,
+  created_by       uuid NOT NULL REFERENCES public.users(id),
+  created_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS photo_galleries_token_idx      ON public.photo_galleries(share_token);
+CREATE INDEX IF NOT EXISTS photo_galleries_job_idx        ON public.photo_galleries(job_id);
+CREATE INDEX IF NOT EXISTS photo_galleries_company_idx    ON public.photo_galleries(company_id);
+
+ALTER TABLE public.photo_galleries ENABLE ROW LEVEL SECURITY;
+
+-- Read: any company member.
+CREATE POLICY "Company members can read photo galleries"
+  ON public.photo_galleries
+  FOR SELECT
+  TO authenticated
+  USING (company_id = public.current_company_id());
+
+-- Mutate: supervisors and above. Galleries are a deliverable artifact —
+-- not something a field worker should be able to create or revoke.
+CREATE POLICY "Supervisors+ manage photo galleries"
+  ON public.photo_galleries
+  FOR ALL
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+  );
+
+-- ──────────────────────────────────────────────────────────────
+-- 3. photo_gallery_items
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.photo_gallery_items (
+  gallery_id      uuid NOT NULL REFERENCES public.photo_galleries(id) ON DELETE CASCADE,
+  media_asset_id  uuid NOT NULL REFERENCES public.media_assets(id) ON DELETE CASCADE,
+  position        integer NOT NULL DEFAULT 0,
+  added_at        timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (gallery_id, media_asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS photo_gallery_items_media_idx
+  ON public.photo_gallery_items (media_asset_id);
+
+ALTER TABLE public.photo_gallery_items ENABLE ROW LEVEL SECURITY;
+
+-- Inherit access from parent gallery.
+CREATE POLICY "Company members can read gallery items"
+  ON public.photo_gallery_items
+  FOR SELECT
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.photo_galleries g
+      WHERE g.id = photo_gallery_items.gallery_id
+        AND g.company_id = public.current_company_id()
+    )
+  );
+
+CREATE POLICY "Supervisors+ manage gallery items"
+  ON public.photo_gallery_items
+  FOR ALL
+  TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM public.photo_galleries g
+      WHERE g.id = photo_gallery_items.gallery_id
+        AND g.company_id = public.current_company_id()
+        AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM public.photo_galleries g
+      WHERE g.id = photo_gallery_items.gallery_id
+        AND g.company_id = public.current_company_id()
+        AND public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+    )
+  );
+
+-- ──────────────────────────────────────────────────────────────
+-- 4. Extend job_share_tokens with password + watermark
+-- ──────────────────────────────────────────────────────────────
+ALTER TABLE public.job_share_tokens
+  ADD COLUMN IF NOT EXISTS password_hash    text,
+  ADD COLUMN IF NOT EXISTS brand_watermark  boolean NOT NULL DEFAULT true;
+
+-- ──────────────────────────────────────────────────────────────
+-- 4b. Export kinds — accept photo PDF report templates
+-- ──────────────────────────────────────────────────────────────
+ALTER TYPE export_kind ADD VALUE IF NOT EXISTS 'photo_insurance_claim';
+ALTER TYPE export_kind ADD VALUE IF NOT EXISTS 'photo_daily_log';
+ALTER TYPE export_kind ADD VALUE IF NOT EXISTS 'photo_before_after';
+
+-- ──────────────────────────────────────────────────────────────
+-- 5. Storage bucket for generated PDF reports
+-- ──────────────────────────────────────────────────────────────
+-- Private bucket — PDFs are served via short-lived signed URLs from the
+-- `reports` edge function. 50 MB cap accommodates photo-heavy packets.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'reports',
+  'reports',
+  false,
+  52428800,  -- 50MB
+  ARRAY['application/pdf']
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- Read access: company members for their own tenant's reports (path prefix
+-- is the company_id). Writes are only ever performed by the service role.
+CREATE POLICY "Company members can read their reports"
+  ON storage.objects
+  FOR SELECT
+  TO authenticated
+  USING (
+    bucket_id = 'reports'
+    AND (storage.foldername(name))[1] = public.current_company_id()::text
+  );
+-- <<< END MIGRATION: 20260420000000_photo_tags_and_galleries.sql
+
+-- >>> BEGIN MIGRATION: 20260420100000_work_permits.sql
+-- ========================================================
+-- Migration: 20260420100000_work_permits
+-- Purpose:
+--   1. Create public.work_permits        (full-lifecycle work permit
+--                                         issued by supervisor — required
+--                                         before clock-in on regulated jobs:
+--                                         HV electrical, confined space,
+--                                         hot work, etc.)
+--   2. Add jobs.requires_permit          (per-job toggle that drives the
+--                                         mobile clock-in gate)
+--   3. Add jobs.required_permit_type     (which permit type is required for
+--                                         the gate to pass)
+--
+-- Conventions:
+--   - RLS helpers public.current_company_id() / public.current_user_role()
+--     are defined in 20260403000003_rls_and_policies.sql.
+--   - Trigger function set_updated_at() is defined in 20260403000000_foundation_tables.sql.
+--   - user_role enum values: 'owner','admin','supervisor','foreman','worker'
+--     (20260403000000_foundation_tables.sql).
+--   - users.id === auth.uid() (FK to auth.users), so RLS uses auth.uid() directly.
+--   - Lifecycle: draft → issued → (active|expired|revoked).
+--     'active' is a server-side projection (status='issued' AND expires_at > now()),
+--     not a stored value — see edge function check_active. A future sweeper will
+--     flip 'issued' rows whose expires_at has passed to 'expired'.
+--   - Idempotent: CREATE TABLE IF NOT EXISTS, ADD COLUMN IF NOT EXISTS,
+--     CREATE INDEX IF NOT EXISTS. No destructive DDL. Safe to re-run.
+-- ========================================================
+
+-- ──────────────────────────────────────────────────────────────
+-- 1. work_permits — full-lifecycle work permit
+-- ──────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.work_permits (
+  id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id         uuid        NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  job_id             uuid        NOT NULL REFERENCES public.jobs(id)      ON DELETE CASCADE,
+  permit_number      text        NOT NULL,
+  permit_type        text        NOT NULL
+                                 CHECK (permit_type IN (
+                                   'hv_electrical',
+                                   'confined_space',
+                                   'hot_work',
+                                   'working_at_heights',
+                                   'lockout_tagout',
+                                   'excavation',
+                                   'general',
+                                   'other'
+                                 )),
+  description        text        NULL,
+  status             text        NOT NULL DEFAULT 'draft'
+                                 CHECK (status IN ('draft', 'issued', 'active', 'expired', 'revoked')),
+  issued_by          uuid        NULL     REFERENCES public.users(id),
+  issued_at          timestamptz NULL,
+  -- expires_at NULL means "never expires" — open-ended permit valid for the
+  -- duration of the job. Active = status='issued' AND (expires_at IS NULL OR expires_at > now()).
+  expires_at         timestamptz NULL,
+  revoked_by         uuid        NULL     REFERENCES public.users(id),
+  revoked_at         timestamptz NULL,
+  revocation_reason  text        NULL,
+  pdf_path           text        NULL,
+  created_by         uuid        NOT NULL REFERENCES public.users(id),
+  created_at         timestamptz NOT NULL DEFAULT now(),
+  updated_at         timestamptz NOT NULL DEFAULT now(),
+  -- Permit numbers are issued by an external regulator and should not be
+  -- duplicated within a company.
+  UNIQUE (company_id, permit_number)
+);
+
+CREATE TRIGGER trg_work_permits_updated_at
+BEFORE UPDATE ON public.work_permits
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- "Is there an active permit for this job?" — drives the mobile clock-in gate
+-- and the check_active edge action.
+CREATE INDEX IF NOT EXISTS work_permits_company_job_status_idx
+  ON public.work_permits (company_id, job_id, status);
+
+-- Drives the future expiry-sweeper job (find issued rows past expires_at).
+CREATE INDEX IF NOT EXISTS work_permits_company_expires_idx
+  ON public.work_permits (company_id, expires_at);
+
+-- Drives the job-detail "permits on this job" panel.
+CREATE INDEX IF NOT EXISTS work_permits_job_status_idx
+  ON public.work_permits (job_id, status);
+
+ALTER TABLE public.work_permits ENABLE ROW LEVEL SECURITY;
+
+-- SELECT: any authenticated user in the caller's company.
+CREATE POLICY "Company sees work permits"
+  ON public.work_permits
+  FOR SELECT
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+  );
+
+-- INSERT: owner/admin/supervisor only, scoped to their company.
+CREATE POLICY "Supervisors+ insert work permits"
+  ON public.work_permits
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+  );
+
+-- UPDATE: owner/admin/supervisor only, scoped to their company.
+CREATE POLICY "Supervisors+ update work permits"
+  ON public.work_permits
+  FOR UPDATE
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+  )
+  WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+  );
+
+-- DELETE: owner/admin/supervisor only, scoped to their company.
+CREATE POLICY "Supervisors+ delete work permits"
+  ON public.work_permits
+  FOR DELETE
+  TO authenticated
+  USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('owner', 'admin', 'supervisor')
+  );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.work_permits TO authenticated;
+
+-- ──────────────────────────────────────────────────────────────
+-- 2. jobs.requires_permit + jobs.required_permit_type
+-- ──────────────────────────────────────────────────────────────
+ALTER TABLE public.jobs
+  ADD COLUMN IF NOT EXISTS requires_permit boolean NOT NULL DEFAULT false;
+
+ALTER TABLE public.jobs
+  ADD COLUMN IF NOT EXISTS required_permit_type text NULL
+  CHECK (required_permit_type IN (
+    'hv_electrical',
+    'confined_space',
+    'hot_work',
+    'working_at_heights',
+    'lockout_tagout',
+    'excavation',
+    'general',
+    'other'
+  ));
+
+-- ========================================================
+-- Summary of changes (2026-04-20):
+--   1. Created public.work_permits
+--        - columns: id, company_id, job_id, permit_number, permit_type
+--          (hv_electrical / confined_space / hot_work / working_at_heights /
+--          lockout_tagout / excavation / general / other), description,
+--          status (draft/issued/active/expired/revoked), issued_by, issued_at,
+--          expires_at (NULL = never expires), revoked_by, revoked_at,
+--          revocation_reason, pdf_path, created_by, created_at, updated_at
+--        - UNIQUE (company_id, permit_number)
+--        - indexes: (company_id, job_id, status),
+--                   (company_id, expires_at),
+--                   (job_id, status)
+--        - trigger: set_updated_at() on UPDATE
+--        - RLS: company-SELECT-all, supervisor+-INSERT/UPDATE/DELETE
+--        - GRANT SELECT, INSERT, UPDATE, DELETE to authenticated
+--   2. Added jobs.requires_permit boolean NOT NULL DEFAULT false
+--        - drives the mobile clock-in permit gate
+--   3. Added jobs.required_permit_type text NULL (same enum as work_permits)
+--        - nullable; only consulted when requires_permit = true
+-- ========================================================
+-- <<< END MIGRATION: 20260420100000_work_permits.sql
+
+-- >>> BEGIN MIGRATION: 20260420200000_geofence_enforced_flag.sql
+-- Add geofence enforcement toggle to jobs.
+--
+-- Background: some workers (remote / hybrid / office-based supporting field
+-- crews) need to clock in from anywhere. Previously every job required the
+-- worker to be inside `geofence_radius_m` of `site_lat/site_lng` — this is
+-- enforced by `sync_events` edge function via a haversine distance check.
+--
+-- With this flag, supervisors can opt-out of geofence enforcement per job.
+-- When `geofence_enforced = false`, clock-in is allowed from anywhere as long
+-- as the GPS coordinates are valid (we still log the location for audit).
+--
+-- Default is `true` so existing jobs keep their current strict behavior.
+
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS geofence_enforced boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN jobs.geofence_enforced IS
+  'When false, clock-in skips the haversine distance check. Workers can clock in from anywhere with valid GPS. Default true keeps existing strict behavior.';
+-- <<< END MIGRATION: 20260420200000_geofence_enforced_flag.sql
+
+-- >>> BEGIN MIGRATION: 20260420300000_permits_expiry_cron_schedule.sql
+-- ========================================================
+-- Migration: 20260420300000_permits_expiry_cron_schedule
+-- Purpose:   Schedule permits_expiry_cron edge function hourly
+--            via pg_cron + pg_net. Flips work_permits rows past
+--            expires_at from 'issued' → 'expired' so reports and
+--            the supervisor UI stay honest. The mobile clock-in
+--            gate already computes 'active' inline, so a
+--            late/skipped run never lets an expired permit pass
+--            the gate — this job only keeps the admin UI honest.
+-- Convention: matches the existing 'media-optimize' cron job.
+--             Pulls CRON_SECRET + SUPABASE_URL from Vault secrets
+--             that are already seeded on this project.
+-- Idempotent: unschedule-if-exists before re-scheduling. Safe to
+--             re-run. No-op for pg_cron / pg_net (already enabled).
+-- ========================================================
+
+-- pg_cron + pg_net are enabled project-wide. Ensure-only (no-op if present).
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_net  WITH SCHEMA extensions;
+
+-- Unschedule any prior job of the same name so this migration is
+-- safe to re-run on a project where it's already scheduled.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'permits-expiry') THEN
+    PERFORM cron.unschedule('permits-expiry');
+  END IF;
+END
+$$;
+
+-- Schedule: minute 5 of every hour. Cheap, idempotent, and matches
+-- the async posture of media-optimize (fire-and-forget http_post).
+SELECT cron.schedule(
+  'permits-expiry',
+  '5 * * * *',
+  $cron$
+  SELECT net.http_post(
+    url     := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'SUPABASE_URL')
+               || '/functions/v1/permits_expiry_cron',
+    headers := jsonb_build_object(
+      'x-cron-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'CRON_SECRET')
+    )::jsonb,
+    body    := '{}'::jsonb
+  )
+  $cron$
+);
+
+-- ========================================================
+-- Summary (2026-04-20):
+--   * Hourly cron 'permits-expiry' at '5 * * * *'.
+--   * POSTs to {SUPABASE_URL}/functions/v1/permits_expiry_cron.
+--   * x-cron-secret header pulled from Vault at call time.
+--   * Reuses the pre-existing CRON_SECRET + SUPABASE_URL vault
+--     secrets (same ones used by media-optimize).
+-- ========================================================
+-- <<< END MIGRATION: 20260420300000_permits_expiry_cron_schedule.sql
+
+-- >>> BEGIN MIGRATION: 20260420400000_dashboard_overview_rpc.sql
+-- Dashboard overview RPC
+--
+-- Background: the supervisor dashboard previously fired 6 parallel Supabase
+-- queries on every open, including a `tasks` scan with no LIMIT that could
+-- return every task in the company. At ~500 jobs × 20 tasks that's 10k rows
+-- shipped over the wire to render a single "completed/total" progress bar.
+--
+-- This RPC consolidates the dashboard payload into one round-trip with the
+-- aggregations done server-side. It runs STABLE + SECURITY INVOKER so RLS on
+-- the underlying tables keeps multi-tenant isolation intact — callers only
+-- see their own company's data. The function takes no args; it resolves the
+-- caller's company via current_company_id() to avoid trust issues with a
+-- client-supplied parameter.
+--
+-- Return shape (jsonb):
+--   {
+--     "stats":              { "totalJobs", "activeWorkers", "photosToday", "pendingOT" },
+--     "jobs":               [ { id, name, code, status, site_name, geofence_radius_m } ],
+--     "activeWorkers":      [ { user_id, full_name, status, hours, first_clock_in_at } ],
+--     "jobTaskCounts":      [ { job_id, total, completed } ]
+--   }
+--
+-- `jobs` is capped at 20 rows (first page). The dashboard still has its own
+-- loadMoreJobs() that paginates via the jobs table directly for page 2+.
+
+CREATE OR REPLACE FUNCTION public.get_dashboard_overview(p_job_limit integer DEFAULT 20)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER  -- RLS on underlying tables enforces tenant isolation.
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  v_company_id uuid := current_company_id();
+  v_today_start timestamptz := date_trunc('day', now());
+  v_result jsonb;
+BEGIN
+  IF v_company_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'stats',         jsonb_build_object('totalJobs', 0, 'activeWorkers', 0, 'photosToday', 0, 'pendingOT', 0),
+      'jobs',          '[]'::jsonb,
+      'activeWorkers', '[]'::jsonb,
+      'jobTaskCounts', '[]'::jsonb
+    );
+  END IF;
+
+  WITH
+    -- First page of active jobs (same order the dashboard already uses).
+    active_jobs AS (
+      SELECT j.id, j.name, j.code, j.status, j.site_name, j.geofence_radius_m
+      FROM jobs j
+      WHERE j.company_id = v_company_id
+        AND j.deleted_at IS NULL
+        AND j.status IN ('active', 'in_progress')
+      ORDER BY j.created_at DESC
+      LIMIT GREATEST(p_job_limit, 1)
+    ),
+
+    -- All clock events today for the company (used for both activeWorkers list
+    -- and the activeWorkers count stat).
+    today_clock AS (
+      SELECT
+        ce.user_id,
+        ce.event_subtype,
+        ce.occurred_at,
+        u.full_name
+      FROM clock_events ce
+      JOIN users u ON u.id = ce.user_id
+      WHERE ce.company_id = v_company_id
+        AND ce.occurred_at >= v_today_start
+        AND ce.event_subtype IN ('clock_in', 'clock_out', 'break_start', 'break_end')
+    ),
+
+    -- Per-worker: their LATEST event today + their EARLIEST clock_in today.
+    -- A worker is "active" when their latest event is not a clock_out.
+    worker_latest AS (
+      SELECT DISTINCT ON (user_id)
+        user_id, full_name, event_subtype AS latest_subtype, occurred_at AS latest_at
+      FROM today_clock
+      ORDER BY user_id, occurred_at DESC
+    ),
+    worker_first_in AS (
+      SELECT user_id, MIN(occurred_at) AS first_in_at
+      FROM today_clock
+      WHERE event_subtype = 'clock_in'
+      GROUP BY user_id
+    ),
+    active_workers AS (
+      SELECT
+        wl.user_id,
+        wl.full_name,
+        CASE WHEN wl.latest_subtype = 'break_start' THEN 'break' ELSE 'working' END AS status,
+        wfi.first_in_at
+      FROM worker_latest wl
+      LEFT JOIN worker_first_in wfi ON wfi.user_id = wl.user_id
+      WHERE wl.latest_subtype <> 'clock_out'
+    ),
+
+    -- Task aggregates per active job only (no full-table scan).
+    job_task_counts AS (
+      SELECT
+        t.job_id,
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE t.status IN ('completed', 'done'))::int AS completed
+      FROM tasks t
+      JOIN active_jobs aj ON aj.id = t.job_id
+      GROUP BY t.job_id
+    ),
+
+    -- Scalar stats.
+    stats AS (
+      SELECT
+        (SELECT COUNT(*) FROM active_jobs)::int AS total_jobs,
+        (SELECT COUNT(DISTINCT user_id) FROM today_clock WHERE event_subtype = 'clock_in')::int AS active_workers,
+        (SELECT COUNT(*) FROM photo_events
+          WHERE company_id = v_company_id AND occurred_at >= v_today_start)::int AS photos_today,
+        (SELECT COUNT(*) FROM ot_requests
+          WHERE company_id = v_company_id AND status = 'pending')::int AS pending_ot
+    )
+
+  SELECT jsonb_build_object(
+    'stats', (
+      SELECT jsonb_build_object(
+        'totalJobs',     s.total_jobs,
+        'activeWorkers', s.active_workers,
+        'photosToday',   s.photos_today,
+        'pendingOT',     s.pending_ot
+      ) FROM stats s
+    ),
+    'jobs', COALESCE(
+      (SELECT jsonb_agg(to_jsonb(aj)) FROM active_jobs aj),
+      '[]'::jsonb
+    ),
+    'activeWorkers', COALESCE(
+      (SELECT jsonb_agg(jsonb_build_object(
+        'user_id',          aw.user_id,
+        'full_name',        aw.full_name,
+        'status',           aw.status,
+        'first_clock_in_at', aw.first_in_at
+      )) FROM active_workers aw),
+      '[]'::jsonb
+    ),
+    'jobTaskCounts', COALESCE(
+      (SELECT jsonb_agg(jsonb_build_object(
+        'job_id',    jtc.job_id,
+        'total',     jtc.total,
+        'completed', jtc.completed
+      )) FROM job_task_counts jtc),
+      '[]'::jsonb
+    )
+  )
+  INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+COMMENT ON FUNCTION public.get_dashboard_overview(integer) IS
+  'Single-round-trip dashboard payload. Resolves company from the caller via current_company_id(); RLS on jobs/clock_events/photo_events/ot_requests/tasks/users still applies under SECURITY INVOKER. Replaces 6 parallel queries + an unbounded tasks scan.';
+
+-- Grants: authenticated users call this; RLS handles which company's data they see.
+GRANT EXECUTE ON FUNCTION public.get_dashboard_overview(integer) TO authenticated;
+-- <<< END MIGRATION: 20260420400000_dashboard_overview_rpc.sql
+
+-- >>> BEGIN MIGRATION: 20260420500000_photo_reviews.sql
+-- Photo review queue (Phase 1) — separate mutable table, preserves event-store immutability.
+--
+-- Context:
+--   photo_events is the immutable evidence record (append-only, partitioned by
+--   occurred_at). For a triage workflow — approve / flag / snooze — we need
+--   mutable state. We keep that in photo_reviews, keyed by the photo_event
+--   composite PK. Each photo has 0 or 1 review row; rows are created lazily by
+--   the supervisor clicking approve/flag.
+--
+-- Phase 1 (this migration):
+--   - photo_reviews table with status/flag_reason/reviewer
+--   - RLS scoping to company_id, read open to all company users, write to
+--     supervisor+
+--   - Realtime publication so /photos tabs auto-refresh
+--
+-- Phase 2 (tracked as FUX-013b):
+--   - auto-flag trigger: flag on GPS >100m from job site OR within 30s of
+--     previous photo by same user
+
+CREATE TABLE IF NOT EXISTS public.photo_reviews (
+  photo_event_id    uuid        NOT NULL,
+  photo_occurred_at timestamptz NOT NULL,
+  company_id        uuid        NOT NULL REFERENCES public.companies(id) ON DELETE RESTRICT,
+  status            text        NOT NULL DEFAULT 'unreviewed'
+    CHECK (status IN ('unreviewed', 'approved', 'flagged')),
+  flag_reason       text,
+  auto_flag_reason  text,  -- reserved for FUX-013b
+  reviewed_by       uuid        REFERENCES public.users(id) ON DELETE SET NULL,
+  reviewed_at       timestamptz,
+  updated_at        timestamptz NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (photo_event_id, photo_occurred_at)
+);
+
+COMMENT ON TABLE public.photo_reviews IS
+  'Mutable review state for photo_events. Composite key mirrors photo_events PK. One row per triaged photo; absence implies "unreviewed" by default.';
+
+CREATE INDEX IF NOT EXISTS idx_photo_reviews_company_status
+  ON public.photo_reviews(company_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_photo_reviews_reviewed_at
+  ON public.photo_reviews(reviewed_at DESC) WHERE reviewed_at IS NOT NULL;
+
+-- updated_at auto-bump via the shared helper defined in foundation_tables.sql
+DROP TRIGGER IF EXISTS set_photo_reviews_updated_at ON public.photo_reviews;
+CREATE TRIGGER set_photo_reviews_updated_at
+  BEFORE UPDATE ON public.photo_reviews
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- RLS
+ALTER TABLE public.photo_reviews ENABLE ROW LEVEL SECURITY;
+
+-- Any authenticated user in the company can SELECT (so the /photos feed
+-- shows the same counts to workers who may want to see if their photo was
+-- flagged).
+CREATE POLICY "Tenant read photo_reviews" ON public.photo_reviews
+  FOR SELECT USING (company_id = public.current_company_id());
+
+-- Supervisor+ can INSERT (first review) and UPDATE (change verdict).
+CREATE POLICY "Supervisor insert photo_reviews" ON public.photo_reviews
+  FOR INSERT WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+  );
+
+CREATE POLICY "Supervisor update photo_reviews" ON public.photo_reviews
+  FOR UPDATE USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('supervisor', 'admin', 'owner')
+  );
+
+GRANT SELECT, INSERT, UPDATE ON public.photo_reviews TO authenticated;
+
+-- Realtime: broadcast review changes so the /photos UI tabs stay in sync
+-- across multiple supervisors reviewing simultaneously.
+ALTER PUBLICATION supabase_realtime ADD TABLE public.photo_reviews;
+-- <<< END MIGRATION: 20260420500000_photo_reviews.sql
+
+-- >>> BEGIN MIGRATION: 20260420600000_user_certifications.sql
+-- User certifications registry (Phase 1 of FUX-016).
+--
+-- Why: safety/compliance alerts (e.g., HV electrical, OSHA-30, first-aid)
+-- expire. Today FieldOps has no way to surface "worker X's cert expires in
+-- 7 days" — the PRD calls for this but nothing in the schema tracks it.
+--
+-- Scope (this migration):
+--   - user_certifications table with expires_at
+--   - RLS: any company user SELECT; admin-only INSERT/UPDATE/DELETE
+--   - Indexes for the upcoming alert scan (company + expires_at, user)
+--
+-- Out of scope (tracked as FUX-016b):
+--   - Admin /settings/certifications CRUD page
+--   - Document storage for attached cert PDFs
+--   - "Expire" sweeper cron (certs don't need flip-to-expired like permits;
+--     the alert scan computes "expiring within N days" in SQL against the
+--     live expires_at value).
+
+CREATE TABLE IF NOT EXISTS public.user_certifications (
+  id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id    uuid        NOT NULL REFERENCES public.companies(id) ON DELETE RESTRICT,
+  user_id       uuid        NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  cert_type     text        NOT NULL,    -- free-form label for Phase 1: "OSHA-30", "HV Electrical", etc.
+  cert_number   text        NULL,        -- optional issuer-issued identifier
+  issuer        text        NULL,
+  issued_at     date        NULL,
+  expires_at    date        NULL,        -- NULL = non-expiring
+  document_path text        NULL,        -- Storage bucket path, populated by FUX-016b
+  notes         text        NULL,
+  created_at    timestamptz NOT NULL DEFAULT NOW(),
+  updated_at    timestamptz NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.user_certifications IS
+  'Worker certifications with optional expiration. expires_at NULL means non-expiring. Alert scan surfaces rows expiring within 14 days.';
+
+-- updated_at auto-bump via shared helper
+DROP TRIGGER IF EXISTS set_user_certifications_updated_at ON public.user_certifications;
+CREATE TRIGGER set_user_certifications_updated_at
+  BEFORE UPDATE ON public.user_certifications
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- Indexes: scan-by-expiry + lookup-by-user
+CREATE INDEX IF NOT EXISTS user_certifications_company_expires_idx
+  ON public.user_certifications (company_id, expires_at)
+  WHERE expires_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS user_certifications_user_idx
+  ON public.user_certifications (user_id);
+
+-- RLS
+ALTER TABLE public.user_certifications ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Tenant read user_certifications" ON public.user_certifications
+  FOR SELECT USING (company_id = public.current_company_id());
+
+CREATE POLICY "Admin insert user_certifications" ON public.user_certifications
+  FOR INSERT WITH CHECK (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('admin', 'owner')
+  );
+
+CREATE POLICY "Admin update user_certifications" ON public.user_certifications
+  FOR UPDATE USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('admin', 'owner')
+  );
+
+CREATE POLICY "Admin delete user_certifications" ON public.user_certifications
+  FOR DELETE USING (
+    company_id = public.current_company_id()
+    AND public.current_user_role() IN ('admin', 'owner')
+  );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_certifications TO authenticated;
+-- <<< END MIGRATION: 20260420600000_user_certifications.sql
+
+-- >>> BEGIN MIGRATION: 20260420700000_dashboard_rpc_task_enum_fix.sql
+-- Fix get_dashboard_overview: remove invalid 'done' task_status value
+--
+-- Bug: the function body included `t.status IN ('completed', 'done')` but
+-- public.task_status enum is ('not_started', 'in_progress', 'blocked',
+-- 'completed', 'skipped') — no 'done'. Postgres tried to cast the text
+-- literal 'done' to the enum at runtime and raised, causing PostgREST to
+-- return 400 to the browser. The dashboard hit this on every load for any
+-- authenticated company (v_company_id resolves, CTE runs, enum cast fails).
+--
+-- Root cause: pre-RPC code in page.tsx was JS-side and compared with loose
+-- equality against both 'completed' and 'done'; I carried that redundancy
+-- into SQL without checking that 'done' was never a real enum member.
+--
+-- Fix: compare to 'completed' only. Same behavior — the JS check for 'done'
+-- was dead code against this schema.
+
+CREATE OR REPLACE FUNCTION public.get_dashboard_overview(p_job_limit integer DEFAULT 20)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+STABLE
+SET search_path = public
+AS $$
+DECLARE
+  v_company_id uuid := current_company_id();
+  v_today_start timestamptz := date_trunc('day', now());
+  v_result jsonb;
+BEGIN
+  IF v_company_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'stats',         jsonb_build_object('totalJobs', 0, 'activeWorkers', 0, 'photosToday', 0, 'pendingOT', 0),
+      'jobs',          '[]'::jsonb,
+      'activeWorkers', '[]'::jsonb,
+      'jobTaskCounts', '[]'::jsonb
+    );
+  END IF;
+
+  WITH
+    active_jobs AS (
+      SELECT j.id, j.name, j.code, j.status, j.site_name, j.geofence_radius_m
+      FROM jobs j
+      WHERE j.company_id = v_company_id
+        AND j.deleted_at IS NULL
+        AND j.status IN ('active', 'in_progress')
+      ORDER BY j.created_at DESC
+      LIMIT GREATEST(p_job_limit, 1)
+    ),
+
+    today_clock AS (
+      SELECT
+        ce.user_id,
+        ce.event_subtype,
+        ce.occurred_at,
+        u.full_name
+      FROM clock_events ce
+      JOIN users u ON u.id = ce.user_id
+      WHERE ce.company_id = v_company_id
+        AND ce.occurred_at >= v_today_start
+        AND ce.event_subtype IN ('clock_in', 'clock_out', 'break_start', 'break_end')
+    ),
+
+    worker_latest AS (
+      SELECT DISTINCT ON (user_id)
+        user_id, full_name, event_subtype AS latest_subtype, occurred_at AS latest_at
+      FROM today_clock
+      ORDER BY user_id, occurred_at DESC
+    ),
+    worker_first_in AS (
+      SELECT user_id, MIN(occurred_at) AS first_in_at
+      FROM today_clock
+      WHERE event_subtype = 'clock_in'
+      GROUP BY user_id
+    ),
+    active_workers AS (
+      SELECT
+        wl.user_id,
+        wl.full_name,
+        CASE WHEN wl.latest_subtype = 'break_start' THEN 'break' ELSE 'working' END AS status,
+        wfi.first_in_at
+      FROM worker_latest wl
+      LEFT JOIN worker_first_in wfi ON wfi.user_id = wl.user_id
+      WHERE wl.latest_subtype <> 'clock_out'
+    ),
+
+    job_task_counts AS (
+      SELECT
+        t.job_id,
+        COUNT(*)::int AS total,
+        -- task_status enum is ('not_started', 'in_progress', 'blocked', 'completed', 'skipped').
+        -- Earlier version included 'done' which isn't a valid enum value → Postgres raised,
+        -- returning 400 to the browser. Drop it.
+        COUNT(*) FILTER (WHERE t.status = 'completed')::int AS completed
+      FROM tasks t
+      JOIN active_jobs aj ON aj.id = t.job_id
+      GROUP BY t.job_id
+    ),
+
+    stats AS (
+      SELECT
+        (SELECT COUNT(*) FROM active_jobs)::int AS total_jobs,
+        (SELECT COUNT(DISTINCT user_id) FROM today_clock WHERE event_subtype = 'clock_in')::int AS active_workers,
+        (SELECT COUNT(*) FROM photo_events
+          WHERE company_id = v_company_id AND occurred_at >= v_today_start)::int AS photos_today,
+        (SELECT COUNT(*) FROM ot_requests
+          WHERE company_id = v_company_id AND status = 'pending')::int AS pending_ot
+    )
+
+  SELECT jsonb_build_object(
+    'stats', (
+      SELECT jsonb_build_object(
+        'totalJobs',     s.total_jobs,
+        'activeWorkers', s.active_workers,
+        'photosToday',   s.photos_today,
+        'pendingOT',     s.pending_ot
+      ) FROM stats s
+    ),
+    'jobs', COALESCE(
+      (SELECT jsonb_agg(to_jsonb(aj)) FROM active_jobs aj),
+      '[]'::jsonb
+    ),
+    'activeWorkers', COALESCE(
+      (SELECT jsonb_agg(jsonb_build_object(
+        'user_id',          aw.user_id,
+        'full_name',        aw.full_name,
+        'status',           aw.status,
+        'first_clock_in_at', aw.first_in_at
+      )) FROM active_workers aw),
+      '[]'::jsonb
+    ),
+    'jobTaskCounts', COALESCE(
+      (SELECT jsonb_agg(jsonb_build_object(
+        'job_id',    jtc.job_id,
+        'total',     jtc.total,
+        'completed', jtc.completed
+      )) FROM job_task_counts jtc),
+      '[]'::jsonb
+    )
+  )
+  INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.get_dashboard_overview(integer) TO authenticated;
+-- <<< END MIGRATION: 20260420700000_dashboard_rpc_task_enum_fix.sql
+
+-- >>> BEGIN MIGRATION: 20260420800000_company_logos_bucket_public.sql
+-- Make company-logos bucket public so getPublicUrl() actually resolves.
+--
+-- Bug: 20260406000000_admin_system.sql created the bucket with public=false.
+-- The company_logo edge function then calls supabaseAdmin.storage.getPublicUrl()
+-- and stores the returned URL on companies.logo_url. Sidebar + LogoUpload
+-- render that URL in <img src>. But getPublicUrl() on a private bucket returns
+-- a URL that 404/403s when fetched unauthenticated (which <img> tags always are)
+-- — the user sees a broken image placeholder right after uploading.
+--
+-- Fix: flip the bucket to public. Company logos are public information
+-- anyway (displayed on client-facing portals, PDF reports, shared galleries).
+-- Paths are `{companyId}/logo.png` where companyId is a UUID, so the bucket
+-- being public doesn't enumerate companies — you have to already know the ID.
+--
+-- The existing storage RLS policies remain in place; they still gate signed-URL
+-- reads, inserts, and deletes to the owning company's authenticated users.
+-- Public bucket behavior only enables CDN-style reads of the raw object by URL.
+
+UPDATE storage.buckets
+SET public = true,
+    updated_at = now()
+WHERE id = 'company-logos';
+-- <<< END MIGRATION: 20260420800000_company_logos_bucket_public.sql
+
+-- >>> BEGIN MIGRATION: 20260420900000_photo_auto_flag_trigger.sql
+-- ========================================================
+-- Migration: 20260420900000_photo_auto_flag_trigger
+-- Purpose:   FUX-013b — auto-flag photos at insert time when:
+--              (a) GPS is >100m outside the job site geofence
+--                  (and the job has geofence_enforced=true and site coords),
+--              (b) the same user uploaded another photo for the same job
+--                  in the last 30 seconds (duplicate / rapid-fire bug).
+--            Flags become photo_reviews rows with status='flagged' and
+--            auto_flag_reason populated. Supervisors can override via the
+--            existing approve/flag UI; absence of a photo_reviews row still
+--            implies "unreviewed" (Phase 1 contract preserved).
+-- Notes:
+--   * Trigger function runs SECURITY DEFINER and grants exec to the
+--     authenticated role so the inserting user (worker) writes the review
+--     row regardless of the supervisor-only INSERT policy on
+--     photo_reviews. This is the standard pattern for system-generated
+--     mutable shadow rows.
+--   * photo_events is partitioned; AFTER triggers on the partition root
+--     fire for inserts on every partition in PG 13+, which we're on.
+--   * Idempotent: CREATE OR REPLACE FUNCTION + DROP TRIGGER IF EXISTS.
+-- ========================================================
+
+-- Haversine distance in metres between two (lat, lng) points in degrees.
+-- earth_distance from cube/earthdistance would also work but pulls in
+-- extensions we don't otherwise need. Pure SQL keeps the surface small.
+CREATE OR REPLACE FUNCTION public.haversine_m(
+  lat1 double precision,
+  lng1 double precision,
+  lat2 double precision,
+  lng2 double precision
+) RETURNS double precision
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+  r            CONSTANT double precision := 6371000.0;
+  phi1         double precision;
+  phi2         double precision;
+  delta_phi    double precision;
+  delta_lambda double precision;
+  a            double precision;
+BEGIN
+  IF lat1 IS NULL OR lng1 IS NULL OR lat2 IS NULL OR lng2 IS NULL THEN
+    RETURN NULL;
+  END IF;
+  phi1 := radians(lat1);
+  phi2 := radians(lat2);
+  delta_phi := radians(lat2 - lat1);
+  delta_lambda := radians(lng2 - lng1);
+  a := sin(delta_phi / 2) ^ 2
+       + cos(phi1) * cos(phi2) * sin(delta_lambda / 2) ^ 2;
+  RETURN r * 2 * atan2(sqrt(a), sqrt(1 - a));
+END;
+$$;
+
+COMMENT ON FUNCTION public.haversine_m IS
+  'Great-circle distance in metres between two (lat, lng) coordinate pairs in degrees. Returns NULL if any arg is NULL.';
+
+-- Trigger function: decide whether a fresh photo_event should be auto-flagged
+-- and, if so, insert the photo_reviews row. Runs after the INSERT commits.
+CREATE OR REPLACE FUNCTION public.photo_events_auto_flag()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_job              RECORD;
+  v_distance_m       double precision;
+  v_reasons          text[] := ARRAY[]::text[];
+  v_recent_count     integer;
+  v_geofence_buffer  CONSTANT double precision := 100.0;
+  v_recent_window    CONSTANT interval := interval '30 seconds';
+BEGIN
+  -- Pull the job's geofence config once. If the job is gone (race with
+  -- ON DELETE CASCADE) bail without flagging — the photo row will go
+  -- away on its own.
+  SELECT j.site_lat, j.site_lng, j.geofence_radius_m, j.geofence_enforced
+    INTO v_job
+    FROM public.jobs j
+   WHERE j.id = NEW.job_id;
+  IF NOT FOUND THEN
+    RETURN NEW;
+  END IF;
+
+  -- Off-site check — only fires for jobs that ENFORCE geofence and have
+  -- valid site coords + GPS on the photo. We allow a 100m buffer on top
+  -- of the configured radius so a photo taken from the edge of the
+  -- geofence (or with a 10–20m GPS fix wobble) doesn't auto-flag.
+  IF COALESCE(v_job.geofence_enforced, true)
+     AND v_job.site_lat IS NOT NULL
+     AND v_job.site_lng IS NOT NULL
+     AND NEW.gps_lat IS NOT NULL
+     AND NEW.gps_lng IS NOT NULL
+  THEN
+    v_distance_m := public.haversine_m(
+      v_job.site_lat, v_job.site_lng,
+      NEW.gps_lat,    NEW.gps_lng
+    );
+    IF v_distance_m IS NOT NULL
+       AND v_distance_m > (COALESCE(v_job.geofence_radius_m, 100) + v_geofence_buffer)
+    THEN
+      v_reasons := v_reasons || format(
+        'photo_gps_off_site:%sm_from_site',
+        round(v_distance_m)::text
+      );
+    END IF;
+  END IF;
+
+  -- Rapid-fire check — same user, same job, within the last 30s.
+  -- Reads from photo_events directly; the just-inserted row is excluded
+  -- because we filter on id <> NEW.id.
+  SELECT count(*) INTO v_recent_count
+    FROM public.photo_events pe
+   WHERE pe.user_id = NEW.user_id
+     AND pe.job_id  = NEW.job_id
+     AND pe.id      <> NEW.id
+     AND pe.occurred_at >= NEW.occurred_at - v_recent_window
+     AND pe.occurred_at <  NEW.occurred_at;
+  IF v_recent_count > 0 THEN
+    v_reasons := v_reasons || 'rapid_fire_duplicate_candidate';
+  END IF;
+
+  -- Insert the review row if we have any reasons. Use ON CONFLICT DO
+  -- NOTHING so a concurrent supervisor click doesn't fight us.
+  IF cardinality(v_reasons) > 0 THEN
+    INSERT INTO public.photo_reviews (
+      photo_event_id,
+      photo_occurred_at,
+      company_id,
+      status,
+      auto_flag_reason
+    ) VALUES (
+      NEW.id,
+      NEW.occurred_at,
+      NEW.company_id,
+      'flagged',
+      array_to_string(v_reasons, ', ')
+    )
+    ON CONFLICT (photo_event_id, photo_occurred_at) DO NOTHING;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.photo_events_auto_flag IS
+  'AFTER INSERT trigger on photo_events. Creates a photo_reviews(status=flagged) row when the photo is outside the job geofence or part of a rapid-fire duplicate burst. Supervisors can override via the normal /photos review UI.';
+
+-- Allow the workers/anyone-authenticated role to trigger the function via
+-- INSERTs on photo_events. Trigger functions run as their owner under
+-- SECURITY DEFINER, so this GRANT is belt-and-suspenders.
+REVOKE ALL ON FUNCTION public.photo_events_auto_flag FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.photo_events_auto_flag TO authenticated;
+
+-- Wire onto the partitioned parent. Postgres 13+ propagates the trigger
+-- to every existing and future partition.
+DROP TRIGGER IF EXISTS trg_photo_events_auto_flag ON public.photo_events;
+CREATE TRIGGER trg_photo_events_auto_flag
+  AFTER INSERT ON public.photo_events
+  FOR EACH ROW EXECUTE FUNCTION public.photo_events_auto_flag();
+
+-- ========================================================
+-- Summary (2026-04-21):
+--   * haversine_m(lat1,lng1,lat2,lng2) helper.
+--   * photo_events_auto_flag() SECURITY DEFINER trigger fn.
+--   * trg_photo_events_auto_flag on photo_events (AFTER INSERT, FOR EACH ROW).
+--   * Flag if:
+--       - geofence_enforced AND site coords + gps known
+--         AND distance > geofence_radius_m + 100m buffer
+--       - same user inserted another photo for the same job in the
+--         previous 30 seconds.
+--   * photo_reviews row inserted with status='flagged', auto_flag_reason
+--     populated; ON CONFLICT DO NOTHING so a manual review wins.
+-- ========================================================
+-- <<< END MIGRATION: 20260420900000_photo_auto_flag_trigger.sql
+
+-- >>> BEGIN MIGRATION: 20260421000000_photo_comments.sql
+-- Photo comments + @mentions (Photo Command Center — Slice 1).
+--
+-- Context:
+--   CompanyCam-parity gap: threaded comments on individual photos with
+--   @mention notifications. Keyed off media_asset_id (not the photo_events
+--   composite PK) so we get a clean ON DELETE CASCADE and mirror photo_tags;
+--   media_assets is a normal table with a plain id PK. All company members may
+--   comment (unlike photo_reviews, which is supervisor-write).
+--
+--   Mentions are stored two ways: inline @[Full Name](user_uuid) markup in the
+--   body (stable display) AND a normalized photo_comment_mentions join table
+--   (indexed "mentions of me" queries + alert fan-out). The photo-comments edge
+--   function parses the markup on POST and writes both, then inserts one
+--   alert_events row per validated mentioned user.
+--
+--   Deletion is a soft delete (deleted_at) so removing a parent comment does not
+--   orphan its replies; the UI renders deleted parents as a placeholder.
+
+-- ── photo_comments ────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.photo_comments (
+  id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id     uuid        NOT NULL REFERENCES public.companies(id)    ON DELETE RESTRICT,
+  media_asset_id uuid        NOT NULL REFERENCES public.media_assets(id) ON DELETE CASCADE,
+  parent_id      uuid        REFERENCES public.photo_comments(id)        ON DELETE CASCADE, -- NULL = top-level
+  author_id      uuid        NOT NULL REFERENCES public.users(id)        ON DELETE CASCADE,
+  body           text        NOT NULL CHECK (char_length(body) BETWEEN 1 AND 4000),
+  deleted_at     timestamptz, -- soft delete so threads don't orphan replies
+  created_at     timestamptz NOT NULL DEFAULT NOW(),
+  updated_at     timestamptz NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.photo_comments IS
+  'Threaded comments on a media_asset. body holds inline @[name](uuid) mention markup; normalized mentions live in photo_comment_mentions. Soft-deleted via deleted_at.';
+
+CREATE INDEX IF NOT EXISTS idx_photo_comments_media_asset
+  ON public.photo_comments(media_asset_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_photo_comments_company
+  ON public.photo_comments(company_id);
+CREATE INDEX IF NOT EXISTS idx_photo_comments_parent
+  ON public.photo_comments(parent_id) WHERE parent_id IS NOT NULL;
+
+-- ── photo_comment_mentions ───────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.photo_comment_mentions (
+  comment_id        uuid        NOT NULL REFERENCES public.photo_comments(id) ON DELETE CASCADE,
+  mentioned_user_id uuid        NOT NULL REFERENCES public.users(id)          ON DELETE CASCADE,
+  company_id        uuid        NOT NULL REFERENCES public.companies(id)      ON DELETE RESTRICT,
+  created_at        timestamptz NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (comment_id, mentioned_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pcm_user
+  ON public.photo_comment_mentions(mentioned_user_id, created_at);
+
+-- ── updated_at trigger (shared helper from foundation_tables.sql) ──
+DROP TRIGGER IF EXISTS set_photo_comments_updated_at ON public.photo_comments;
+CREATE TRIGGER set_photo_comments_updated_at
+  BEFORE UPDATE ON public.photo_comments
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- ── RLS ──────────────────────────────────────────────────────
+ALTER TABLE public.photo_comments         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.photo_comment_mentions ENABLE ROW LEVEL SECURITY;
+
+-- Any company member can read comments.
+CREATE POLICY "Tenant read photo_comments" ON public.photo_comments
+  FOR SELECT USING (company_id = public.current_company_id());
+
+-- Any company member can post, but only as themselves.
+CREATE POLICY "Member insert photo_comments" ON public.photo_comments
+  FOR INSERT WITH CHECK (
+    company_id = public.current_company_id()
+    AND author_id = auth.uid()
+  );
+
+-- Author may edit/soft-delete own; supervisor+ may moderate any.
+-- Matches SUPERVISOR_AND_ABOVE_ROLES in functions/_shared/roles.ts.
+CREATE POLICY "Author or supervisor update photo_comments" ON public.photo_comments
+  FOR UPDATE USING (
+    company_id = public.current_company_id()
+    AND (
+      author_id = auth.uid()
+      OR public.current_user_role() IN ('owner', 'admin', 'supervisor', 'foreman')
+    )
+  );
+
+-- Mentions: explicit policies (grants alone are insufficient once RLS is on).
+-- Rows are written server-side via the service role (bypasses RLS); these keep
+-- any direct authenticated access tenant-scoped.
+CREATE POLICY "Tenant read photo_comment_mentions" ON public.photo_comment_mentions
+  FOR SELECT USING (company_id = public.current_company_id());
+
+CREATE POLICY "Member insert photo_comment_mentions" ON public.photo_comment_mentions
+  FOR INSERT WITH CHECK (company_id = public.current_company_id());
+
+GRANT SELECT, INSERT, UPDATE ON public.photo_comments         TO authenticated;
+GRANT SELECT, INSERT         ON public.photo_comment_mentions TO authenticated;
+
+-- ── Realtime ─────────────────────────────────────────────────
+-- Broadcast comment changes so the lightbox comments panel stays in sync.
+ALTER PUBLICATION supabase_realtime ADD TABLE public.photo_comments;
+-- <<< END MIGRATION: 20260421000000_photo_comments.sql
+
+-- >>> BEGIN MIGRATION: 20260421100000_partition_rls_security_fix.sql
+-- Security fix: close two confirmed multi-tenant data leaks.
+--
+-- BUG 1 — Event child-partition RLS bypass (CRITICAL).
+--   The 9 partitioned event tables (clock_events, photo_events, task_events,
+--   note_events, ot_requests, ot_approval_events, alert_events,
+--   correction_events, shift_report_events) had RLS + tenant policies on the
+--   ROOT only. In Postgres, a parent's policies cascade to partitions, but
+--   enforcement on DIRECT child access requires the CHILD to have RLS enabled.
+--   The child partitions (e.g. clock_events_2026_06) had RLS disabled and
+--   default grants to anon/authenticated, so any user could read every
+--   company's data by querying the child table directly through PostgREST.
+--   Verified: parent SELECT returned 0 rows for `authenticated`, child returned
+--   rows spanning multiple companies.
+--   Fix: enable RLS on every existing child partition (parent policies then
+--   apply) and revoke direct grants as defense-in-depth. A helper function
+--   secures future partitions — partition-creation migrations MUST call it.
+--
+-- BUG 2 — background_jobs RLS never enabled (CRITICAL).
+--   20260418000000 created a deny-all policy on background_jobs but no migration
+--   ever ran ENABLE ROW LEVEL SECURITY, so the policy was inert and the async
+--   job queue (payload jsonb) was world-readable/writable by anon/authenticated.
+--   Fix: enable RLS (activates the existing deny-all policy) + revoke grants.
+--
+-- service_role has BYPASSRLS, so edge functions (which use the service key) are
+-- unaffected by all of the below.
+
+-- ── Helper: secure a single event partition (idempotent) ──────
+-- Future partition-creation migrations should call:
+--   SELECT public.secure_event_partition('public.clock_events_2026_07');
+CREATE OR REPLACE FUNCTION public.secure_event_partition(child regclass)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', child);
+  EXECUTE format('REVOKE ALL ON %s FROM anon, authenticated', child);
+END;
+$$;
+
+COMMENT ON FUNCTION public.secure_event_partition(regclass) IS
+  'Enable RLS + revoke anon/authenticated grants on an event child partition so the partitioned parent''s tenant policies are enforced on direct access. Call this for every new partition.';
+
+-- ── BUG 1: secure all existing child partitions of event roots ──
+DO $$
+DECLARE
+  roots text[] := ARRAY[
+    'clock_events','photo_events','task_events','note_events',
+    'ot_requests','ot_approval_events','alert_events',
+    'correction_events','shift_report_events'
+  ];
+  r text;
+  child regclass;
+BEGIN
+  FOREACH r IN ARRAY roots LOOP
+    -- skip roots that don't exist (defensive)
+    IF to_regclass('public.'||r) IS NULL THEN
+      CONTINUE;
+    END IF;
+    FOR child IN
+      SELECT inhrelid::regclass
+      FROM pg_inherits
+      WHERE inhparent = ('public.'||r)::regclass
+    LOOP
+      PERFORM public.secure_event_partition(child);
+    END LOOP;
+  END LOOP;
+END;
+$$;
+
+-- ── BUG 2: activate the dormant deny-all policy on background_jobs ──
+ALTER TABLE public.background_jobs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.background_jobs FROM anon, authenticated;
+-- <<< END MIGRATION: 20260421100000_partition_rls_security_fix.sql
+
+-- >>> BEGIN MIGRATION: 20260421200000_export_artifacts.sql
+-- Create export_artifacts: audit trail of generated reports/exports.
+--
+-- The reports edge function (functions/reports/index.ts) inserts a row here for
+-- every job report, timesheet CSV, and photo packet it generates, and returns
+-- the artifact_id to the client. The table was never created, so those inserts
+-- silently failed (they are not error-checked) and artifact_id pointed at
+-- nothing. Schema derived from the three insert sites (lines ~199, 251, 495).
+
+CREATE TABLE IF NOT EXISTS public.export_artifacts (
+  id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id   uuid        NOT NULL REFERENCES public.companies(id) ON DELETE RESTRICT,
+  job_id       uuid        REFERENCES public.jobs(id)  ON DELETE CASCADE,   -- nullable: timesheets aren't job-scoped
+  generated_by uuid        REFERENCES public.users(id) ON DELETE SET NULL,
+  export_kind  text        NOT NULL,   -- e.g. job_report_pdf, timesheet_csv, photo_insurance_claim
+  status       text        NOT NULL DEFAULT 'completed',
+  generated_at timestamptz NOT NULL DEFAULT NOW(),
+  metadata     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  created_at   timestamptz NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE public.export_artifacts IS
+  'Audit trail of generated exports (reports, timesheets, photo packets). Written by the reports edge function via the service role.';
+
+CREATE INDEX IF NOT EXISTS idx_export_artifacts_company
+  ON public.export_artifacts(company_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_export_artifacts_job
+  ON public.export_artifacts(job_id) WHERE job_id IS NOT NULL;
+
+-- RLS: tenant-scoped reads for company members. Inserts happen via the service
+-- role (reports function), which bypasses RLS, so no INSERT policy is needed.
+ALTER TABLE public.export_artifacts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Tenant read export_artifacts" ON public.export_artifacts
+  FOR SELECT USING (company_id = public.current_company_id());
+
+GRANT SELECT ON public.export_artifacts TO authenticated;
+-- <<< END MIGRATION: 20260421200000_export_artifacts.sql
+
+-- >>> BEGIN MIGRATION: 20260421300000_fk_indexes.sql
+-- Add indexes on foreign-key columns that lacked a supporting index.
+--
+-- Unindexed FK columns force a sequential scan + row locks on the child table
+-- whenever the parent row is deleted/updated (worst for ON DELETE CASCADE/SET
+-- NULL), and slow ordinary joins/filters on those columns. List derived from a
+-- live pg_constraint vs pg_index audit. Indexes on partitioned roots
+-- (alert_events, correction_events, note_events, clock_events, photo_events,
+-- shift_report_events, ot_approval_events) propagate to all partitions.
+
+-- ── ON DELETE CASCADE (highest priority) ──────────────────────
+CREATE INDEX IF NOT EXISTS idx_alert_events_job_id              ON public.alert_events(job_id);
+CREATE INDEX IF NOT EXISTS idx_company_feature_overrides_flag   ON public.company_feature_overrides(flag_key);
+CREATE INDEX IF NOT EXISTS idx_correction_events_job_id         ON public.correction_events(job_id);
+CREATE INDEX IF NOT EXISTS idx_photo_comments_author_id         ON public.photo_comments(author_id);
+CREATE INDEX IF NOT EXISTS idx_safety_checklists_job_id         ON public.safety_checklists(job_id);
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_shift_id     ON public.shift_swap_requests(shift_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id             ON public.tasks(parent_task_id);
+
+-- ── ON DELETE SET NULL ────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_alert_events_user_id             ON public.alert_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_clock_events_device_id           ON public.clock_events(device_id);
+CREATE INDEX IF NOT EXISTS idx_expense_events_decided_by        ON public.expense_events(decided_by);
+CREATE INDEX IF NOT EXISTS idx_expense_events_media_asset_id    ON public.expense_events(media_asset_id);
+CREATE INDEX IF NOT EXISTS idx_expense_events_reimbursed_by     ON public.expense_events(reimbursed_by);
+CREATE INDEX IF NOT EXISTS idx_media_assets_original_media_id   ON public.media_assets(original_media_id);
+CREATE INDEX IF NOT EXISTS idx_media_assets_stamped_media_id    ON public.media_assets(stamped_media_id);
+CREATE INDEX IF NOT EXISTS idx_media_assets_thumbnail_media_id  ON public.media_assets(thumbnail_media_id);
+CREATE INDEX IF NOT EXISTS idx_note_events_task_id              ON public.note_events(task_id);
+CREATE INDEX IF NOT EXISTS idx_photo_events_device_id           ON public.photo_events(device_id);
+CREATE INDEX IF NOT EXISTS idx_photo_reviews_reviewed_by        ON public.photo_reviews(reviewed_by);
+CREATE INDEX IF NOT EXISTS idx_schedule_shifts_published_by     ON public.schedule_shifts(published_by);
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_swap_with    ON public.shift_swap_requests(swap_with_user_id);
+CREATE INDEX IF NOT EXISTS idx_time_corrections_decided_by      ON public.time_corrections(decided_by);
+
+-- ── ON DELETE RESTRICT / NO ACTION (join performance) ─────────
+CREATE INDEX IF NOT EXISTS idx_alert_events_resolved_by         ON public.alert_events(resolved_by);
+CREATE INDEX IF NOT EXISTS idx_assignments_assigned_by          ON public.assignments(assigned_by);
+CREATE INDEX IF NOT EXISTS idx_correction_events_corrected_by   ON public.correction_events(corrected_by);
+CREATE INDEX IF NOT EXISTS idx_job_budgets_created_by           ON public.job_budgets(created_by);
+CREATE INDEX IF NOT EXISTS idx_job_share_tokens_created_by      ON public.job_share_tokens(created_by);
+CREATE INDEX IF NOT EXISTS idx_ot_approval_events_approver_id   ON public.ot_approval_events(approver_id);
+CREATE INDEX IF NOT EXISTS idx_ot_approval_events_worker_id     ON public.ot_approval_events(worker_id);
+CREATE INDEX IF NOT EXISTS idx_photo_comment_mentions_company   ON public.photo_comment_mentions(company_id);
+CREATE INDEX IF NOT EXISTS idx_photo_events_media_asset_id      ON public.photo_events(media_asset_id);
+CREATE INDEX IF NOT EXISTS idx_photo_galleries_created_by       ON public.photo_galleries(created_by);
+CREATE INDEX IF NOT EXISTS idx_photo_tags_created_by            ON public.photo_tags(created_by);
+CREATE INDEX IF NOT EXISTS idx_platform_admin_invites_created_by ON public.platform_admin_invites(created_by);
+CREATE INDEX IF NOT EXISTS idx_projects_created_by              ON public.projects(created_by);
+CREATE INDEX IF NOT EXISTS idx_pto_requests_decided_by          ON public.pto_requests(decided_by);
+CREATE INDEX IF NOT EXISTS idx_schedule_shifts_created_by       ON public.schedule_shifts(created_by);
+CREATE INDEX IF NOT EXISTS idx_shift_report_events_foreman_id   ON public.shift_report_events(foreman_id);
+CREATE INDEX IF NOT EXISTS idx_shift_swap_requests_decided_by   ON public.shift_swap_requests(decided_by);
+CREATE INDEX IF NOT EXISTS idx_tasks_completed_by               ON public.tasks(completed_by);
+CREATE INDEX IF NOT EXISTS idx_time_corrections_created_by      ON public.time_corrections(created_by);
+CREATE INDEX IF NOT EXISTS idx_timecard_signatures_supervisor   ON public.timecard_signatures(supervisor_id);
+CREATE INDEX IF NOT EXISTS idx_work_permits_created_by          ON public.work_permits(created_by);
+CREATE INDEX IF NOT EXISTS idx_work_permits_issued_by           ON public.work_permits(issued_by);
+CREATE INDEX IF NOT EXISTS idx_work_permits_revoked_by          ON public.work_permits(revoked_by);
+-- <<< END MIGRATION: 20260421300000_fk_indexes.sql
+
+-- >>> BEGIN MIGRATION: 20260421400000_photo_comments_write_hardening.sql
+-- Harden photo comments write path.
+--
+-- The product write path is the `photo-comments` edge function because it
+-- validates media ownership, parses/validates @mentions, and fans out alerts.
+-- Direct authenticated table writes would bypass that logic, so keep direct
+-- client access read-only for realtime/select and require service-role writes.
+
+REVOKE INSERT, UPDATE, DELETE ON public.photo_comments FROM authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.photo_comment_mentions FROM authenticated;
+
+DROP POLICY IF EXISTS "Member insert photo_comments" ON public.photo_comments;
+DROP POLICY IF EXISTS "Author or supervisor update photo_comments" ON public.photo_comments;
+DROP POLICY IF EXISTS "Member insert photo_comment_mentions" ON public.photo_comment_mentions;
+
+GRANT SELECT ON public.photo_comments TO authenticated;
+GRANT SELECT ON public.photo_comment_mentions TO authenticated;
+
+COMMENT ON TABLE public.photo_comments IS
+  'Threaded comments on a media_asset. Direct authenticated access is read-only; writes go through the photo-comments edge function so @mention validation and alert fan-out cannot be bypassed.';
+
+COMMENT ON TABLE public.photo_comment_mentions IS
+  'Validated @mention join rows for photo comments. Direct authenticated access is read-only; rows are written by the photo-comments edge function.';
+-- <<< END MIGRATION: 20260421400000_photo_comments_write_hardening.sql
+
+-- >>> BEGIN MIGRATION: 20260421500000_export_artifacts_write_hardening.sql
+-- Harden export_artifacts write path.
+--
+-- The reports edge function writes export audit rows with the service role.
+-- Authenticated users should be able to read their tenant's artifacts only.
+
+REVOKE INSERT, UPDATE, DELETE ON public.export_artifacts FROM anon, authenticated;
+GRANT SELECT ON public.export_artifacts TO authenticated;
+
+COMMENT ON TABLE public.export_artifacts IS
+  'Audit trail of generated exports (reports, timesheets, photo packets). Direct authenticated access is read-only; writes are service-role-only through the reports edge function.';
+-- <<< END MIGRATION: 20260421500000_export_artifacts_write_hardening.sql
+
+-- >>> BEGIN MIGRATION: 20260421600000_export_artifacts_fk_index.sql
+-- Add supporting index for export_artifacts.generated_by FK.
+--
+-- This FK was introduced after the broad FK-index sweep, so it needs its own
+-- index to keep user deletes/updates and export-history joins from scanning.
+
+CREATE INDEX IF NOT EXISTS idx_export_artifacts_generated_by
+  ON public.export_artifacts(generated_by);
+-- <<< END MIGRATION: 20260421600000_export_artifacts_fk_index.sql
+
+-- >>> BEGIN MIGRATION: 20260421700000_event_partition_horizon.sql
+-- ========================================================
+-- Migration: 20260421700000_event_partition_horizon
+-- Purpose:   Close the event-store partition gap and stop it recurring.
+--
+-- BUG (found 2026-07-05): the 9 partitioned event roots were created with
+-- monthly partitions for 2026-04..2026-06 only. From 2026-07-01 every new
+-- clock/photo/task/OT/alert event lands in the *_default catch-all
+-- partition — no pruning, dashboard queries degrade linearly forever, and
+-- rows must be manually migrated out of DEFAULT before a proper partition
+-- for that month can ever be attached (Postgres blocks overlapping ranges
+-- while DEFAULT holds rows in-range).
+--
+-- Fix, in three parts:
+--   1. ensure_event_partitions(months_ahead): creates any missing monthly
+--      partitions from the current month through now()+months_ahead for all
+--      9 roots, calling secure_event_partition() (20260421100000) on each so
+--      new partitions inherit the RLS lockdown.
+--      If the *_default partition already holds rows for a target month, the
+--      function moves them into the new partition first (safe at beta scale;
+--      revisit if _default ever exceeds ~100k rows).
+--   2. Run it now for +6 months.
+--   3. pg_cron job 'ensure-event-partitions' runs monthly so the horizon
+--      keeps rolling without human intervention.
+-- ========================================================
+
+CREATE OR REPLACE FUNCTION public.ensure_event_partitions(months_ahead int DEFAULT 6)
+RETURNS int
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  roots CONSTANT text[] := ARRAY[
+    'clock_events','photo_events','task_events','note_events',
+    'ot_requests','ot_approval_events','alert_events',
+    'correction_events','shift_report_events'
+  ];
+  root         text;
+  part_col     text;
+  month_start  date;
+  month_end    date;
+  part_name    text;
+  created      int := 0;
+  moved        bigint;
+BEGIN
+  FOR i IN 0..months_ahead LOOP
+    month_start := date_trunc('month', now())::date + (i || ' months')::interval;
+    month_end   := month_start + interval '1 month';
+    FOREACH root IN ARRAY roots LOOP
+      IF to_regclass('public.' || root) IS NULL THEN
+        CONTINUE;  -- defensive: root missing in this environment
+      END IF;
+
+      -- Partition column differs per root (ot_requests → requested_at,
+      -- alert_events → triggered_at, rest → occurred_at). Resolve it from
+      -- the catalog instead of assuming.
+      SELECT a.attname INTO part_col
+        FROM pg_partitioned_table pt
+        JOIN pg_attribute a
+          ON a.attrelid = pt.partrelid AND a.attnum = pt.partattrs[0]
+       WHERE pt.partrelid = ('public.' || root)::regclass;
+      IF part_col IS NULL THEN
+        CONTINUE;  -- not actually partitioned; skip
+      END IF;
+      part_name := format('%s_%s', root, to_char(month_start, 'YYYY_MM'));
+      IF to_regclass('public.' || part_name) IS NOT NULL THEN
+        CONTINUE;  -- partition already exists
+      END IF;
+
+      -- If the DEFAULT partition holds rows inside the target range, park
+      -- them in a temp table first — Postgres refuses to attach a range
+      -- partition that overlaps rows currently in DEFAULT.
+      EXECUTE format(
+        'CREATE TEMP TABLE _repart AS
+           SELECT * FROM %I_default
+           WHERE %I >= %L AND %I < %L',
+        root, part_col, month_start, part_col, month_end);
+      EXECUTE format(
+        'DELETE FROM %I_default
+           WHERE %I >= %L AND %I < %L',
+        root, part_col, month_start, part_col, month_end);
+
+      EXECUTE format(
+        'CREATE TABLE %I PARTITION OF %I FOR VALUES FROM (%L) TO (%L)',
+        part_name, root, month_start, month_end);
+      PERFORM public.secure_event_partition(('public.' || part_name)::regclass);
+
+      EXECUTE format('INSERT INTO %I SELECT * FROM _repart', root);
+      GET DIAGNOSTICS moved = ROW_COUNT;
+      IF moved > 0 THEN
+        RAISE NOTICE 'ensure_event_partitions: moved % rows from %_default into %',
+          moved, root, part_name;
+      END IF;
+      DROP TABLE _repart;
+
+      created := created + 1;
+    END LOOP;
+  END LOOP;
+  RETURN created;
+END;
+$$;
+
+COMMENT ON FUNCTION public.ensure_event_partitions(int) IS
+  'Creates missing monthly partitions for the 9 event roots through now()+months_ahead, securing each with secure_event_partition() and rescuing any rows that already fell into the DEFAULT partition. Returns the number of partitions created. Scheduled monthly via pg_cron job ensure-event-partitions.';
+
+-- Run immediately: cover the current gap plus a 6-month horizon.
+SELECT public.ensure_event_partitions(6);
+
+-- Keep the horizon rolling: 1st of every month at 02:10 UTC.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'ensure-event-partitions') THEN
+    PERFORM cron.unschedule('ensure-event-partitions');
+  END IF;
+END
+$$;
+
+SELECT cron.schedule(
+  'ensure-event-partitions',
+  '10 2 1 * *',
+  $cron$ SELECT public.ensure_event_partitions(6) $cron$
+);
+
+-- ========================================================
+-- Summary (2026-07-05):
+--   * ensure_event_partitions(months_ahead) helper (SECURITY DEFINER).
+--   * Immediate run: creates 2026-07 .. 2027-01 partitions for all 9 roots,
+--     each secured via secure_event_partition().
+--   * pg_cron 'ensure-event-partitions' monthly on the 1st, 02:10 UTC.
+--   * DEFAULT-partition rows in range are migrated into the new partition.
+-- ========================================================
+-- <<< END MIGRATION: 20260421700000_event_partition_horizon.sql
+
+-- >>> BEGIN MIGRATION: 20260421800000_worker_heartbeat.sql
+-- ========================================================
+-- Migration: 20260421800000_worker_heartbeat
+-- Purpose:   FUX-015 — worker "last seen" heartbeat.
+--
+-- Mobile pings public.touch_last_seen() every few minutes while the app is
+-- foregrounded (and on resume). /workers and /crew can then render
+-- "last ping 18 min ago"; a clocked-in worker whose phone has gone dark
+-- (dead battery, out of coverage, app killed) shows amber >30 min and red
+-- >2 h instead of silently looking on-shift forever.
+--
+-- Design notes:
+--   * Column on users (not a separate table): one row per user, overwrite
+--     semantics, no growth, no partitioning concerns. app_version comes
+--     along because "worker is on a 3-week-old build" answers half of all
+--     support tickets.
+--   * SECURITY DEFINER RPC instead of an UPDATE policy on users: workers
+--     have no UPDATE grant on users today and widening that for two columns
+--     would invite privilege creep. The RPC updates only auth.uid()'s row.
+--   * No RLS change needed for reads — company SELECT policy on users
+--     already exposes the new columns to teammates.
+-- ========================================================
+
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS last_seen_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_seen_app_version text;
+
+COMMENT ON COLUMN public.users.last_seen_at IS
+  'Last mobile-app heartbeat (touch_last_seen RPC). NULL = never pinged (e.g. web-only users).';
+
+CREATE OR REPLACE FUNCTION public.touch_last_seen(app_version text DEFAULT NULL)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.users
+     SET last_seen_at = now(),
+         last_seen_app_version = COALESCE(app_version, last_seen_app_version)
+   WHERE id = auth.uid();
+$$;
+
+COMMENT ON FUNCTION public.touch_last_seen(text) IS
+  'Heartbeat: stamps last_seen_at (and optionally app version) on the caller''s own users row. Called by the mobile app every ~4 minutes while foregrounded.';
+
+REVOKE ALL ON FUNCTION public.touch_last_seen(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.touch_last_seen(text) TO authenticated;
+
+-- ========================================================
+-- Summary (2026-07-05):
+--   * users.last_seen_at + users.last_seen_app_version columns.
+--   * touch_last_seen(app_version) RPC — SECURITY DEFINER, self-row only,
+--     EXECUTE granted to authenticated.
+-- ========================================================
+-- <<< END MIGRATION: 20260421800000_worker_heartbeat.sql
+
+-- >>> BEGIN MIGRATION: 20261017045454_pollo_movil_operations.sql
+-- Pollo Móvil operational domain. This is additive to the FieldOps base schema.
+CREATE SCHEMA IF NOT EXISTS private;
+
+CREATE TABLE public.restaurant_branches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id uuid NOT NULL REFERENCES public.companies(id) ON DELETE RESTRICT,
+  name text NOT NULL,
+  timezone text NOT NULL,
+  enable_time_clock boolean NOT NULL DEFAULT false,
+  require_gps_for_time_clock boolean NOT NULL DEFAULT false,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (company_id, name),
+  UNIQUE (company_id, id),
+  CHECK (NOT require_gps_for_time_clock OR enable_time_clock)
+);
+
+CREATE TABLE public.restaurant_areas (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (branch_id, name),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_positions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (branch_id, name),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_memberships (
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  company_id uuid NOT NULL REFERENCES public.companies(id) ON DELETE RESTRICT,
+  user_id uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  access_role text NOT NULL CHECK (access_role IN ('admin', 'supervisor', 'employee')),
+  is_active boolean NOT NULL DEFAULT true,
+  customer_service_active boolean NOT NULL DEFAULT false,
+  created_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (branch_id, user_id),
+  FOREIGN KEY (company_id, branch_id)
+    REFERENCES public.restaurant_branches(company_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_member_positions (
+  branch_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  position_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (branch_id, user_id, position_id),
+  FOREIGN KEY (branch_id, user_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, position_id)
+    REFERENCES public.restaurant_positions(branch_id, id) ON DELETE CASCADE
+);
+
+-- Optional attendance records. GPS is event-only; this model has no background tracking.
+CREATE TABLE public.restaurant_time_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  employee_id uuid NOT NULL,
+  clock_in_at timestamptz NOT NULL,
+  clock_out_at timestamptz,
+  clock_in_latitude numeric(9,6),
+  clock_in_longitude numeric(9,6),
+  clock_in_accuracy_m numeric(8,2),
+  clock_out_latitude numeric(9,6),
+  clock_out_longitude numeric(9,6),
+  clock_out_accuracy_m numeric(8,2),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (clock_out_at IS NULL OR clock_out_at >= clock_in_at),
+  CHECK (clock_in_latitude IS NULL OR clock_in_latitude BETWEEN -90 AND 90),
+  CHECK (clock_in_longitude IS NULL OR clock_in_longitude BETWEEN -180 AND 180),
+  CHECK (clock_out_latitude IS NULL OR clock_out_latitude BETWEEN -90 AND 90),
+  CHECK (clock_out_longitude IS NULL OR clock_out_longitude BETWEEN -180 AND 180),
+  FOREIGN KEY (branch_id, employee_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE,
+  UNIQUE (branch_id, id)
+);
+CREATE UNIQUE INDEX restaurant_one_active_time_session
+  ON public.restaurant_time_sessions(branch_id, employee_id) WHERE clock_out_at IS NULL;
+
+CREATE TABLE public.restaurant_time_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  actor_id uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  client_event_id uuid NOT NULL UNIQUE,
+  event_type text NOT NULL CHECK (event_type IN ('clock_in', 'clock_out')),
+  occurred_at timestamptz NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  latitude numeric(9,6),
+  longitude numeric(9,6),
+  accuracy_m numeric(8,2),
+  CHECK (latitude IS NULL OR latitude BETWEEN -90 AND 90),
+  CHECK (longitude IS NULL OR longitude BETWEEN -180 AND 180),
+  FOREIGN KEY (branch_id, session_id)
+    REFERENCES public.restaurant_time_sessions(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_shifts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  employee_id uuid NOT NULL,
+  shift_date date NOT NULL,
+  start_time time NOT NULL,
+  end_time time NOT NULL,
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'published')),
+  created_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (start_time <> end_time),
+  FOREIGN KEY (branch_id, employee_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE,
+  UNIQUE (branch_id, employee_id, shift_date, start_time, end_time),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_shift_breaks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  shift_id uuid NOT NULL,
+  start_time time NOT NULL,
+  end_time time NOT NULL,
+  CHECK (start_time <> end_time),
+  FOREIGN KEY (branch_id, shift_id)
+    REFERENCES public.restaurant_shifts(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_absences (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  employee_id uuid NOT NULL,
+  start_date date NOT NULL,
+  end_date date NOT NULL,
+  status text NOT NULL CHECK (status IN ('pending', 'approved', 'denied')),
+  note text,
+  created_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (end_date >= start_date),
+  FOREIGN KEY (branch_id, employee_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_waste_bins (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0,
+  is_active boolean NOT NULL DEFAULT true,
+  inspection_interval_minutes integer CHECK (inspection_interval_minutes IS NULL OR inspection_interval_minutes > 0),
+  bag_change_activity_name text,
+  bag_change_minutes integer,
+  bag_change_difficulty smallint,
+  bag_change_priority smallint,
+  last_state text CHECK (last_state IS NULL OR last_state IN ('low', 'half', 'full')),
+  last_inspected_at timestamptz,
+  last_bag_changed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (branch_id, name),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_activity_templates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  area_id uuid,
+  name text NOT NULL,
+  description text,
+  activity_type text NOT NULL CHECK (activity_type IN ('scheduled', 'conditional', 'corrective')),
+  schedule_days smallint[] NOT NULL DEFAULT '{}',
+  estimated_minutes integer NOT NULL CHECK (estimated_minutes > 0),
+  difficulty smallint NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  priority smallint NOT NULL CHECK (priority BETWEEN 1 AND 5),
+  is_divisible boolean NOT NULL DEFAULT false,
+  interruptible boolean NOT NULL DEFAULT true,
+  requires_evidence boolean NOT NULL DEFAULT false,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (activity_type <> 'scheduled' OR cardinality(schedule_days) > 0),
+  CHECK (schedule_days <@ ARRAY[1,2,3,4,5,6,7]::smallint[]),
+  FOREIGN KEY (branch_id, area_id)
+    REFERENCES public.restaurant_areas(branch_id, id) ON DELETE SET NULL (area_id),
+  UNIQUE (branch_id, id),
+  UNIQUE (branch_id, name)
+);
+
+CREATE TABLE public.restaurant_activity_positions (
+  branch_id uuid NOT NULL,
+  activity_template_id uuid NOT NULL,
+  position_id uuid NOT NULL,
+  PRIMARY KEY (activity_template_id, position_id),
+  FOREIGN KEY (branch_id, activity_template_id)
+    REFERENCES public.restaurant_activity_templates(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, position_id)
+    REFERENCES public.restaurant_positions(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_waste_positions (
+  branch_id uuid NOT NULL,
+  position_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (branch_id, position_id),
+  FOREIGN KEY (branch_id, position_id)
+    REFERENCES public.restaurant_positions(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_activity_zones (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  activity_template_id uuid NOT NULL,
+  name text NOT NULL,
+  estimated_minutes integer NOT NULL CHECK (estimated_minutes > 0),
+  difficulty smallint NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  sort_order integer NOT NULL DEFAULT 0,
+  FOREIGN KEY (branch_id, activity_template_id)
+    REFERENCES public.restaurant_activity_templates(branch_id, id) ON DELETE CASCADE,
+  UNIQUE (activity_template_id, name),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  activity_template_id uuid,
+  area_id uuid,
+  waste_bin_id uuid,
+  source_event_id uuid,
+  scheduled_for date NOT NULL,
+  task_source text NOT NULL DEFAULT 'scheduled' CHECK (task_source IN ('scheduled', 'conditional', 'corrective', 'waste')),
+  name text NOT NULL,
+  description text,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'paused', 'blocked', 'completed')),
+  assigned_to uuid,
+  estimated_minutes integer NOT NULL CHECK (estimated_minutes > 0),
+  difficulty smallint NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  priority smallint NOT NULL CHECK (priority BETWEEN 1 AND 5),
+  requires_evidence boolean NOT NULL DEFAULT false,
+  started_at timestamptz,
+  paused_at timestamptz,
+  completed_at timestamptz,
+  completed_by uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  created_by uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, activity_template_id)
+    REFERENCES public.restaurant_activity_templates(branch_id, id) ON DELETE SET NULL (activity_template_id),
+  FOREIGN KEY (branch_id, area_id)
+    REFERENCES public.restaurant_areas(branch_id, id) ON DELETE SET NULL (area_id),
+  FOREIGN KEY (branch_id, waste_bin_id)
+    REFERENCES public.restaurant_waste_bins(branch_id, id) ON DELETE SET NULL (waste_bin_id),
+  FOREIGN KEY (branch_id, assigned_to)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE SET NULL (assigned_to),
+  UNIQUE (branch_id, id),
+  CHECK (source_event_id IS NULL OR task_source <> 'scheduled')
+);
+
+CREATE TABLE public.restaurant_task_parts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  task_id uuid NOT NULL,
+  zone_id uuid NOT NULL,
+  assigned_to uuid,
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'paused', 'blocked', 'completed')),
+  estimated_minutes integer NOT NULL CHECK (estimated_minutes > 0),
+  difficulty smallint NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  started_at timestamptz,
+  paused_at timestamptz,
+  completed_at timestamptz,
+  completed_by uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, task_id)
+    REFERENCES public.restaurant_tasks(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, zone_id)
+    REFERENCES public.restaurant_activity_zones(branch_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (branch_id, assigned_to)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE SET NULL (assigned_to),
+  UNIQUE (task_id, zone_id),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_task_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  task_id uuid NOT NULL,
+  part_id uuid,
+  actor_id uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  client_event_id uuid NOT NULL,
+  event_type text NOT NULL,
+  from_status text,
+  to_status text,
+  note text,
+  evidence_path text,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, task_id)
+    REFERENCES public.restaurant_tasks(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, part_id)
+    REFERENCES public.restaurant_task_parts(branch_id, id) ON DELETE CASCADE,
+  UNIQUE (branch_id, actor_id, client_event_id)
+);
+
+CREATE TABLE public.restaurant_waste_inspections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  inspector_id uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  client_event_id uuid NOT NULL,
+  inspected_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (branch_id, client_event_id),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_waste_inspection_results (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  inspection_id uuid NOT NULL,
+  bin_id uuid NOT NULL,
+  declared_state text NOT NULL CHECK (declared_state IN ('low', 'half', 'full')),
+  FOREIGN KEY (branch_id, inspection_id)
+    REFERENCES public.restaurant_waste_inspections(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, bin_id)
+    REFERENCES public.restaurant_waste_bins(branch_id, id) ON DELETE RESTRICT,
+  UNIQUE (inspection_id, bin_id)
+);
+
+CREATE TABLE public.restaurant_incidents (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  area_id uuid,
+  description text NOT NULL CHECK (length(trim(description)) BETWEEN 3 AND 1000),
+  urgency text NOT NULL DEFAULT 'normal' CHECK (urgency IN ('low', 'normal', 'high', 'urgent')),
+  status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'resolved')),
+  is_blocking boolean NOT NULL DEFAULT false,
+  assigned_to uuid,
+  reported_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  client_event_id uuid,
+  resolved_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, area_id)
+    REFERENCES public.restaurant_areas(branch_id, id) ON DELETE SET NULL (area_id),
+  FOREIGN KEY (branch_id, assigned_to)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE SET NULL (assigned_to),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_incident_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  incident_id uuid NOT NULL,
+  actor_id uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  event_type text NOT NULL,
+  note text,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, incident_id)
+    REFERENCES public.restaurant_incidents(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE public.restaurant_evidence (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  task_id uuid NOT NULL,
+  part_id uuid,
+  uploaded_by uuid NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+  object_path text NOT NULL UNIQUE,
+  mime_type text NOT NULL CHECK (mime_type IN ('image/jpeg', 'image/png', 'image/webp')),
+  file_size_bytes bigint NOT NULL CHECK (file_size_bytes BETWEEN 1 AND 10485760),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, task_id)
+    REFERENCES public.restaurant_tasks(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, part_id)
+    REFERENCES public.restaurant_task_parts(branch_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX restaurant_memberships_user_idx ON public.restaurant_memberships(user_id, branch_id) WHERE is_active;
+CREATE INDEX restaurant_member_positions_user_idx ON public.restaurant_member_positions(branch_id, user_id);
+CREATE INDEX restaurant_shifts_window_idx ON public.restaurant_shifts(branch_id, shift_date, status);
+CREATE INDEX restaurant_absences_window_idx ON public.restaurant_absences(branch_id, employee_id, start_date, end_date) WHERE status = 'approved';
+CREATE INDEX restaurant_tasks_daily_idx ON public.restaurant_tasks(branch_id, scheduled_for, status, priority DESC);
+CREATE UNIQUE INDEX restaurant_tasks_schedule_once
+  ON public.restaurant_tasks(branch_id, activity_template_id, scheduled_for)
+  WHERE task_source = 'scheduled' AND activity_template_id IS NOT NULL;
+CREATE UNIQUE INDEX restaurant_tasks_source_event_once
+  ON public.restaurant_tasks(branch_id, source_event_id) WHERE source_event_id IS NOT NULL;
+CREATE INDEX restaurant_time_sessions_employee_idx ON public.restaurant_time_sessions(branch_id, employee_id, clock_in_at DESC);
+CREATE INDEX restaurant_task_parts_assignee_idx ON public.restaurant_task_parts(branch_id, assigned_to, status);
+CREATE INDEX restaurant_incidents_open_idx ON public.restaurant_incidents(branch_id, status, urgency DESC) WHERE status <> 'resolved';
+CREATE UNIQUE INDEX restaurant_incidents_client_event_unique
+  ON public.restaurant_incidents(branch_id, reported_by, client_event_id) WHERE client_event_id IS NOT NULL;
+CREATE UNIQUE INDEX restaurant_one_open_waste_task_per_bin
+  ON public.restaurant_tasks(branch_id, waste_bin_id)
+  WHERE task_source = 'waste' AND waste_bin_id IS NOT NULL AND status <> 'completed';
+
+CREATE TRIGGER restaurant_branches_updated_at BEFORE UPDATE ON public.restaurant_branches
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER restaurant_templates_updated_at BEFORE UPDATE ON public.restaurant_activity_templates
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER restaurant_tasks_updated_at BEFORE UPDATE ON public.restaurant_tasks
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER restaurant_incidents_updated_at BEFORE UPDATE ON public.restaurant_incidents
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+CREATE OR REPLACE FUNCTION private.restaurant_user_role(p_branch_id uuid, p_user_id uuid DEFAULT auth.uid())
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+STABLE
+AS $$
+  SELECT m.access_role
+  FROM public.restaurant_memberships AS m
+  WHERE m.branch_id = p_branch_id
+    AND m.user_id = p_user_id
+    AND m.is_active
+$$;
+
+CREATE OR REPLACE FUNCTION private.restaurant_has_access(p_branch_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+STABLE
+AS $$
+  SELECT private.restaurant_user_role(p_branch_id, (SELECT auth.uid())) IS NOT NULL
+$$;
+
+CREATE OR REPLACE FUNCTION private.restaurant_can_manage(p_branch_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+STABLE
+AS $$
+  SELECT private.restaurant_user_role(p_branch_id, (SELECT auth.uid())) IN ('admin', 'supervisor')
+$$;
+
+CREATE OR REPLACE FUNCTION private.restaurant_can_access_evidence(p_branch_id uuid, p_task_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT private.restaurant_can_manage(p_branch_id)
+    OR EXISTS (
+      SELECT 1 FROM public.restaurant_tasks task
+      WHERE task.branch_id = p_branch_id AND task.id = p_task_id
+        AND task.requires_evidence AND task.assigned_to = (SELECT auth.uid())
+    )
+    OR EXISTS (
+      SELECT 1 FROM public.restaurant_task_parts part
+      JOIN public.restaurant_tasks task ON task.branch_id = part.branch_id AND task.id = part.task_id
+      WHERE part.branch_id = p_branch_id AND part.task_id = p_task_id
+        AND task.requires_evidence AND part.assigned_to = (SELECT auth.uid())
+    );
+$$;
+
+REVOKE ALL ON FUNCTION private.restaurant_user_role(uuid, uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION private.restaurant_has_access(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION private.restaurant_can_manage(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION private.restaurant_can_access_evidence(uuid, uuid) FROM PUBLIC, anon;
+GRANT USAGE ON SCHEMA private TO authenticated;
+GRANT EXECUTE ON FUNCTION private.restaurant_has_access(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION private.restaurant_can_manage(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION private.restaurant_can_access_evidence(uuid, uuid) TO authenticated;
+GRANT USAGE ON SCHEMA private TO service_role;
+GRANT EXECUTE ON FUNCTION private.restaurant_user_role(uuid, uuid) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.record_restaurant_time_event(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_client_event_id uuid,
+  p_event_type text,
+  p_occurred_at timestamptz,
+  p_latitude numeric DEFAULT NULL,
+  p_longitude numeric DEFAULT NULL,
+  p_accuracy_m numeric DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  branch_row public.restaurant_branches%ROWTYPE;
+  session_row public.restaurant_time_sessions%ROWTYPE;
+  existing_event public.restaurant_time_events%ROWTYPE;
+  gps_latitude numeric;
+  gps_longitude numeric;
+  gps_accuracy numeric;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) IS NULL THEN
+    RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED';
+  END IF;
+  SELECT * INTO branch_row FROM public.restaurant_branches WHERE id = p_branch_id AND is_active;
+  IF branch_row.id IS NULL THEN RAISE EXCEPTION 'BRANCH_NOT_FOUND'; END IF;
+  IF NOT branch_row.enable_time_clock THEN RAISE EXCEPTION 'TIME_CLOCK_DISABLED'; END IF;
+  IF p_event_type NOT IN ('clock_in', 'clock_out') OR p_occurred_at IS NULL THEN
+    RAISE EXCEPTION 'INVALID_TIME_EVENT';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_actor_id::text, 0)
+  );
+  SELECT * INTO existing_event FROM public.restaurant_time_events
+  WHERE client_event_id = p_client_event_id;
+  IF existing_event.id IS NOT NULL THEN
+    IF existing_event.branch_id <> p_branch_id OR existing_event.actor_id <> p_actor_id
+      OR existing_event.event_type <> p_event_type THEN RAISE EXCEPTION 'IDEMPOTENCY_KEY_REUSED'; END IF;
+    RETURN jsonb_build_object('session_id', existing_event.session_id, 'event_type', existing_event.event_type, 'duplicate', true);
+  END IF;
+
+  IF branch_row.require_gps_for_time_clock THEN
+    IF p_latitude IS NULL OR p_longitude IS NULL
+      OR p_latitude NOT BETWEEN -90 AND 90 OR p_longitude NOT BETWEEN -180 AND 180
+      OR p_accuracy_m IS NULL OR p_accuracy_m < 0 THEN RAISE EXCEPTION 'GPS_REQUIRED'; END IF;
+    gps_latitude := p_latitude;
+    gps_longitude := p_longitude;
+    gps_accuracy := p_accuracy_m;
+  END IF;
+
+  IF p_event_type = 'clock_in' THEN
+    IF EXISTS (SELECT 1 FROM public.restaurant_time_sessions
+      WHERE branch_id = p_branch_id AND employee_id = p_actor_id AND clock_out_at IS NULL) THEN
+      RAISE EXCEPTION 'ACTIVE_TIME_SESSION';
+    END IF;
+    INSERT INTO public.restaurant_time_sessions(
+      branch_id, employee_id, clock_in_at, clock_in_latitude, clock_in_longitude, clock_in_accuracy_m
+    ) VALUES (
+      p_branch_id, p_actor_id, p_occurred_at, gps_latitude, gps_longitude, gps_accuracy
+    ) RETURNING * INTO session_row;
+  ELSE
+    SELECT * INTO session_row FROM public.restaurant_time_sessions
+    WHERE branch_id = p_branch_id AND employee_id = p_actor_id AND clock_out_at IS NULL
+    FOR UPDATE;
+    IF session_row.id IS NULL THEN RAISE EXCEPTION 'NO_ACTIVE_TIME_SESSION'; END IF;
+    IF p_occurred_at < session_row.clock_in_at THEN RAISE EXCEPTION 'INVALID_TIME_EVENT'; END IF;
+    UPDATE public.restaurant_time_sessions SET
+      clock_out_at = p_occurred_at, clock_out_latitude = gps_latitude,
+      clock_out_longitude = gps_longitude, clock_out_accuracy_m = gps_accuracy
+    WHERE id = session_row.id RETURNING * INTO session_row;
+  END IF;
+
+  INSERT INTO public.restaurant_time_events(
+    branch_id, session_id, actor_id, client_event_id, event_type,
+    occurred_at, latitude, longitude, accuracy_m
+  ) VALUES (
+    p_branch_id, session_row.id, p_actor_id, p_client_event_id, p_event_type,
+    p_occurred_at, gps_latitude, gps_longitude, gps_accuracy
+  );
+  RETURN jsonb_build_object(
+    'session_id', session_row.id, 'event_type', p_event_type,
+    'clock_in_at', session_row.clock_in_at, 'clock_out_at', session_row.clock_out_at,
+    'duplicate', false
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.record_restaurant_time_event(uuid, uuid, uuid, text, timestamptz, numeric, numeric, numeric) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_restaurant_time_event(uuid, uuid, uuid, text, timestamptz, numeric, numeric, numeric) TO service_role;
+
+DO $$
+DECLARE
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'restaurant_branches', 'restaurant_areas', 'restaurant_positions',
+    'restaurant_memberships', 'restaurant_member_positions', 'restaurant_shifts',
+    'restaurant_time_sessions', 'restaurant_time_events',
+    'restaurant_shift_breaks', 'restaurant_absences', 'restaurant_waste_bins',
+    'restaurant_activity_templates', 'restaurant_activity_positions',
+    'restaurant_activity_zones', 'restaurant_waste_positions', 'restaurant_tasks', 'restaurant_task_parts',
+    'restaurant_task_events', 'restaurant_waste_inspections',
+    'restaurant_waste_inspection_results', 'restaurant_incidents',
+    'restaurant_incident_events', 'restaurant_evidence'
+  ] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', table_name);
+    EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon, authenticated', table_name);
+    EXECUTE format('GRANT SELECT ON TABLE public.%I TO authenticated', table_name);
+    EXECUTE format('GRANT ALL ON TABLE public.%I TO service_role', table_name);
+  END LOOP;
+END $$;
+
+CREATE POLICY restaurant_branches_member_read ON public.restaurant_branches
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(id));
+CREATE POLICY restaurant_areas_member_read ON public.restaurant_areas
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_positions_member_read ON public.restaurant_positions
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_memberships_member_read ON public.restaurant_memberships
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_member_positions_member_read ON public.restaurant_member_positions
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_time_sessions_member_read ON public.restaurant_time_sessions
+  FOR SELECT TO authenticated USING (
+    employee_id = (SELECT auth.uid()) OR private.restaurant_can_manage(branch_id)
+  );
+CREATE POLICY restaurant_time_events_member_read ON public.restaurant_time_events
+  FOR SELECT TO authenticated USING (
+    actor_id = (SELECT auth.uid()) OR private.restaurant_can_manage(branch_id)
+  );
+CREATE POLICY restaurant_shifts_member_read ON public.restaurant_shifts
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_shift_breaks_member_read ON public.restaurant_shift_breaks
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_absences_manager_read ON public.restaurant_absences
+  FOR SELECT TO authenticated USING (private.restaurant_can_manage(branch_id));
+CREATE POLICY restaurant_waste_bins_member_read ON public.restaurant_waste_bins
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_activity_templates_member_read ON public.restaurant_activity_templates
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_activity_positions_member_read ON public.restaurant_activity_positions
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_activity_zones_member_read ON public.restaurant_activity_zones
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_waste_positions_manager_read ON public.restaurant_waste_positions
+  FOR SELECT TO authenticated USING (private.restaurant_can_manage(branch_id));
+CREATE POLICY restaurant_tasks_member_read ON public.restaurant_tasks
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_task_parts_member_read ON public.restaurant_task_parts
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_task_events_member_read ON public.restaurant_task_events
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_waste_inspections_member_read ON public.restaurant_waste_inspections
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_waste_results_member_read ON public.restaurant_waste_inspection_results
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_incidents_member_read ON public.restaurant_incidents
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_incident_events_member_read ON public.restaurant_incident_events
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_evidence_member_read ON public.restaurant_evidence
+  FOR SELECT TO authenticated USING (private.restaurant_has_access(branch_id));
+
+CREATE OR REPLACE FUNCTION public.materialize_restaurant_tasks(p_branch_id uuid, p_for_date date)
+RETURNS integer
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  inserted_count integer;
+BEGIN
+  WITH created_tasks AS (
+    INSERT INTO public.restaurant_tasks (
+      branch_id, activity_template_id, area_id, scheduled_for, task_source,
+      name, description, estimated_minutes, difficulty, priority, requires_evidence
+    )
+    SELECT t.branch_id, t.id, t.area_id, p_for_date, t.activity_type,
+      t.name, t.description, t.estimated_minutes, t.difficulty, t.priority, t.requires_evidence
+    FROM public.restaurant_activity_templates AS t
+    WHERE t.branch_id = p_branch_id
+      AND t.activity_type = 'scheduled'
+      AND t.is_active
+      AND extract(isodow FROM p_for_date)::smallint = ANY(t.schedule_days)
+    ON CONFLICT (branch_id, activity_template_id, scheduled_for)
+      WHERE task_source = 'scheduled' AND activity_template_id IS NOT NULL DO NOTHING
+    RETURNING id, branch_id, activity_template_id
+  ), created_parts AS (
+    INSERT INTO public.restaurant_task_parts (
+      branch_id, task_id, zone_id, estimated_minutes, difficulty
+    )
+    SELECT c.branch_id, c.id, z.id, z.estimated_minutes, z.difficulty
+    FROM created_tasks AS c
+    JOIN public.restaurant_activity_templates AS t ON t.id = c.activity_template_id
+    JOIN public.restaurant_activity_zones AS z ON z.activity_template_id = t.id
+    WHERE t.is_divisible
+    RETURNING id
+  )
+  SELECT count(*)::integer INTO inserted_count FROM created_tasks;
+  RETURN inserted_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.create_restaurant_task_instance(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_template_id uuid,
+  p_scheduled_for date,
+  p_source_event_id uuid
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  template_row public.restaurant_activity_templates%ROWTYPE;
+  task_id uuid;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_source_event_id::text, 0)
+  );
+  SELECT id INTO task_id FROM public.restaurant_tasks
+  WHERE branch_id = p_branch_id AND source_event_id = p_source_event_id;
+  IF task_id IS NOT NULL THEN RETURN task_id; END IF;
+
+  SELECT * INTO template_row FROM public.restaurant_activity_templates
+  WHERE branch_id = p_branch_id AND id = p_template_id AND is_active
+    AND activity_type IN ('conditional', 'corrective');
+  IF NOT FOUND THEN RAISE EXCEPTION 'INVALID_ACTIVITY_TEMPLATE'; END IF;
+
+  INSERT INTO public.restaurant_tasks(
+    branch_id, activity_template_id, area_id, source_event_id, scheduled_for,
+    task_source, name, description, estimated_minutes, difficulty, priority, requires_evidence, created_by
+  ) VALUES (
+    p_branch_id, template_row.id, template_row.area_id, p_source_event_id, p_scheduled_for,
+    template_row.activity_type, template_row.name, template_row.description,
+    template_row.estimated_minutes, template_row.difficulty, template_row.priority,
+    template_row.requires_evidence, p_actor_id
+  ) RETURNING id INTO task_id;
+
+  IF template_row.is_divisible THEN
+    INSERT INTO public.restaurant_task_parts(branch_id, task_id, zone_id, estimated_minutes, difficulty)
+    SELECT p_branch_id, task_id, zone.id, zone.estimated_minutes, zone.difficulty
+    FROM public.restaurant_activity_zones zone
+    WHERE zone.branch_id = p_branch_id AND zone.activity_template_id = template_row.id;
+  END IF;
+  RETURN task_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.apply_restaurant_task_action(
+  p_branch_id uuid,
+  p_task_id uuid,
+  p_part_id uuid,
+  p_actor_id uuid,
+  p_action text,
+  p_client_event_id uuid,
+  p_note text DEFAULT NULL,
+  p_evidence_path text DEFAULT NULL,
+  p_occurred_at timestamptz DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  task_row public.restaurant_tasks%ROWTYPE;
+  part_row public.restaurant_task_parts%ROWTYPE;
+  previous_status text;
+  next_status text;
+  event_row public.restaurant_task_events%ROWTYPE;
+  now_at timestamptz := coalesce(p_occurred_at, now());
+  eligible boolean;
+  active_shift boolean;
+  local_now timestamp without time zone;
+  local_date date;
+  local_time time without time zone;
+  branch_timezone text;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_actor_id::text || p_client_event_id::text, 0)
+  );
+  SELECT * INTO event_row
+  FROM public.restaurant_task_events
+  WHERE branch_id = p_branch_id AND actor_id = p_actor_id AND client_event_id = p_client_event_id;
+  IF FOUND THEN
+    RETURN jsonb_build_object('replayed', true, 'task_id', event_row.task_id,
+      'part_id', event_row.part_id, 'status', event_row.to_status);
+  END IF;
+
+  SELECT * INTO task_row FROM public.restaurant_tasks
+  WHERE id = p_task_id AND branch_id = p_branch_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'TASK_NOT_FOUND'; END IF;
+  SELECT * INTO event_row
+  FROM public.restaurant_task_events
+  WHERE branch_id = p_branch_id AND actor_id = p_actor_id AND client_event_id = p_client_event_id;
+  IF FOUND THEN
+    RETURN jsonb_build_object('replayed', true, 'task_id', event_row.task_id,
+      'part_id', event_row.part_id, 'status', event_row.to_status);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.restaurant_memberships
+    WHERE branch_id = p_branch_id AND user_id = p_actor_id AND is_active) THEN
+    RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED';
+  END IF;
+
+  SELECT timezone INTO branch_timezone FROM public.restaurant_branches WHERE id = p_branch_id;
+  IF branch_timezone IS NULL THEN RAISE EXCEPTION 'BRANCH_NOT_FOUND'; END IF;
+  local_now := now_at AT TIME ZONE branch_timezone;
+  local_date := local_now::date;
+  local_time := local_now::time;
+
+  SELECT EXISTS (
+    SELECT 1 FROM public.restaurant_shifts s
+    WHERE s.branch_id = p_branch_id AND s.employee_id = p_actor_id
+      AND s.status = 'published'
+      AND (
+        (s.shift_date = local_date AND s.start_time < s.end_time
+          AND local_time >= s.start_time AND local_time < s.end_time)
+        OR (s.shift_date = local_date AND s.start_time > s.end_time AND local_time >= s.start_time)
+        OR (s.shift_date = local_date - 1 AND s.start_time > s.end_time AND local_time < s.end_time)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM public.restaurant_shift_breaks b
+        WHERE b.branch_id = s.branch_id AND b.shift_id = s.id
+          AND (
+            (b.start_time < b.end_time AND local_time >= b.start_time AND local_time < b.end_time)
+            OR (b.start_time > b.end_time AND (local_time >= b.start_time OR local_time < b.end_time))
+          )
+      )
+  ) AND NOT EXISTS (
+    SELECT 1 FROM public.restaurant_absences a
+    WHERE a.branch_id = p_branch_id AND a.employee_id = p_actor_id
+      AND a.status = 'approved' AND a.start_date <= local_date AND a.end_date >= local_date
+  ) INTO active_shift;
+  IF NOT active_shift THEN RAISE EXCEPTION 'NOT_ON_SHIFT_OR_ON_BREAK'; END IF;
+
+  IF p_part_id IS NULL THEN
+    previous_status := task_row.status;
+    IF task_row.assigned_to IS DISTINCT FROM p_actor_id THEN
+      IF p_action <> 'claim' OR task_row.assigned_to IS NOT NULL OR task_row.status <> 'pending' THEN
+        RAISE EXCEPTION 'TASK_NOT_ASSIGNED_TO_USER';
+      END IF;
+      SELECT EXISTS (
+        SELECT 1 FROM public.restaurant_member_positions mp
+        WHERE mp.branch_id = p_branch_id AND mp.user_id = p_actor_id
+          AND (
+            (task_row.task_source = 'waste' AND EXISTS (
+              SELECT 1 FROM public.restaurant_waste_positions wp
+              WHERE wp.branch_id = p_branch_id AND wp.position_id = mp.position_id
+            ))
+            OR (task_row.task_source <> 'waste' AND task_row.activity_template_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM public.restaurant_activity_positions ap
+              WHERE ap.branch_id = p_branch_id AND ap.position_id = mp.position_id
+                AND ap.activity_template_id = task_row.activity_template_id
+            ))
+          )
+      ) INTO eligible;
+      IF NOT eligible THEN
+        RAISE EXCEPTION 'NO_ELIGIBLE_POSITION';
+      END IF;
+      UPDATE public.restaurant_tasks SET assigned_to = p_actor_id WHERE id = p_task_id;
+      next_status := 'pending';
+    ELSE
+      next_status := CASE p_action
+        WHEN 'start' THEN 'in_progress'
+        WHEN 'resume' THEN 'in_progress'
+        WHEN 'pause' THEN 'paused'
+        WHEN 'complete' THEN 'completed'
+        WHEN 'bag_changed' THEN 'completed'
+        WHEN 'block' THEN 'blocked'
+        ELSE NULL
+      END;
+      IF next_status IS NULL OR NOT (
+        (previous_status = 'pending' AND next_status = 'in_progress') OR
+        (previous_status = 'in_progress' AND next_status IN ('paused', 'completed', 'blocked')) OR
+        (previous_status = 'paused' AND next_status = 'in_progress') OR
+        (previous_status = 'blocked' AND next_status IN ('in_progress', 'completed'))
+      ) THEN RAISE EXCEPTION 'INVALID_TASK_TRANSITION'; END IF;
+      IF next_status = 'completed' AND task_row.requires_evidence AND p_evidence_path IS NULL THEN
+        RAISE EXCEPTION 'EVIDENCE_REQUIRED';
+      END IF;
+      IF p_action = 'bag_changed' AND task_row.task_source <> 'waste' THEN
+        RAISE EXCEPTION 'NOT_A_WASTE_TASK';
+      END IF;
+      IF p_action IN ('start', 'resume') AND task_row.activity_template_id IS NOT NULL
+        AND (SELECT customer_service_active FROM public.restaurant_memberships
+          WHERE branch_id = p_branch_id AND user_id = p_actor_id)
+        AND (SELECT interruptible FROM public.restaurant_activity_templates WHERE id = task_row.activity_template_id) THEN
+        RAISE EXCEPTION 'CUSTOMER_SERVICE_PRIORITY';
+      END IF;
+      UPDATE public.restaurant_tasks SET
+        status = next_status,
+        started_at = CASE WHEN p_action IN ('start', 'resume') THEN coalesce(started_at, now_at) ELSE started_at END,
+        paused_at = CASE WHEN next_status = 'paused' THEN now_at ELSE NULL END,
+        completed_at = CASE WHEN next_status = 'completed' THEN now_at ELSE completed_at END,
+        completed_by = CASE WHEN next_status = 'completed' THEN p_actor_id ELSE completed_by END
+      WHERE id = p_task_id;
+      IF p_action = 'bag_changed' THEN
+        UPDATE public.restaurant_waste_bins SET last_state = 'low', last_bag_changed_at = now_at
+        WHERE id = task_row.waste_bin_id AND branch_id = p_branch_id;
+      END IF;
+    END IF;
+  ELSE
+    SELECT * INTO part_row FROM public.restaurant_task_parts
+    WHERE id = p_part_id AND task_id = p_task_id AND branch_id = p_branch_id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'TASK_PART_NOT_FOUND'; END IF;
+    previous_status := part_row.status;
+    IF part_row.assigned_to IS DISTINCT FROM p_actor_id THEN
+      IF p_action <> 'claim' OR part_row.assigned_to IS NOT NULL OR part_row.status <> 'pending' THEN
+        RAISE EXCEPTION 'TASK_NOT_ASSIGNED_TO_USER';
+      END IF;
+      SELECT EXISTS (
+        SELECT 1 FROM public.restaurant_member_positions mp
+        JOIN public.restaurant_activity_positions ap
+          ON ap.branch_id = mp.branch_id AND ap.position_id = mp.position_id
+        WHERE mp.branch_id = p_branch_id AND mp.user_id = p_actor_id
+          AND ap.activity_template_id = task_row.activity_template_id
+      ) INTO eligible;
+      IF NOT eligible THEN RAISE EXCEPTION 'NO_ELIGIBLE_POSITION'; END IF;
+      UPDATE public.restaurant_task_parts SET assigned_to = p_actor_id WHERE id = p_part_id;
+      next_status := 'pending';
+    ELSE
+      next_status := CASE p_action
+        WHEN 'start' THEN 'in_progress'
+        WHEN 'resume' THEN 'in_progress'
+        WHEN 'pause' THEN 'paused'
+        WHEN 'complete' THEN 'completed'
+        WHEN 'block' THEN 'blocked'
+        ELSE NULL
+      END;
+      IF next_status IS NULL OR NOT (
+        (previous_status = 'pending' AND next_status = 'in_progress') OR
+        (previous_status = 'in_progress' AND next_status IN ('paused', 'completed', 'blocked')) OR
+        (previous_status = 'paused' AND next_status = 'in_progress') OR
+        (previous_status = 'blocked' AND next_status IN ('in_progress', 'completed'))
+      ) THEN RAISE EXCEPTION 'INVALID_TASK_TRANSITION'; END IF;
+      IF next_status = 'completed' AND task_row.requires_evidence AND p_evidence_path IS NULL THEN
+        RAISE EXCEPTION 'EVIDENCE_REQUIRED';
+      END IF;
+      IF p_action IN ('start', 'resume')
+        AND (SELECT customer_service_active FROM public.restaurant_memberships
+          WHERE branch_id = p_branch_id AND user_id = p_actor_id)
+        AND (SELECT interruptible FROM public.restaurant_activity_templates WHERE id = task_row.activity_template_id) THEN
+        RAISE EXCEPTION 'CUSTOMER_SERVICE_PRIORITY';
+      END IF;
+      UPDATE public.restaurant_task_parts SET
+        status = next_status,
+        started_at = CASE WHEN p_action IN ('start', 'resume') THEN coalesce(started_at, now_at) ELSE started_at END,
+        paused_at = CASE WHEN next_status = 'paused' THEN now_at ELSE NULL END,
+        completed_at = CASE WHEN next_status = 'completed' THEN now_at ELSE completed_at END,
+        completed_by = CASE WHEN next_status = 'completed' THEN p_actor_id ELSE completed_by END
+      WHERE id = p_part_id;
+      IF NOT EXISTS (
+        SELECT 1 FROM public.restaurant_task_parts WHERE task_id = p_task_id AND status <> 'completed'
+      ) THEN
+        UPDATE public.restaurant_tasks SET status = 'completed', completed_at = now_at, completed_by = p_actor_id
+        WHERE id = p_task_id;
+      ELSE
+        UPDATE public.restaurant_tasks SET status = 'in_progress', started_at = coalesce(started_at, now_at)
+        WHERE id = p_task_id AND status = 'pending';
+      END IF;
+    END IF;
+  END IF;
+
+  INSERT INTO public.restaurant_task_events (
+    branch_id, task_id, part_id, actor_id, client_event_id, event_type,
+    from_status, to_status, note, evidence_path, occurred_at
+  ) VALUES (
+    p_branch_id, p_task_id, p_part_id, p_actor_id, p_client_event_id, p_action,
+    previous_status, next_status, nullif(trim(p_note), ''), p_evidence_path, now_at
+  );
+
+  RETURN jsonb_build_object('replayed', false, 'task_id', p_task_id,
+    'part_id', p_part_id, 'from_status', previous_status, 'status', next_status);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_restaurant_waste_inspection(
+  p_branch_id uuid,
+  p_inspector_id uuid,
+  p_client_event_id uuid,
+  p_results jsonb,
+  p_occurred_at timestamptz DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  inspection_id uuid;
+  expected_count integer;
+  supplied_count integer;
+  result_item jsonb;
+  bin_row public.restaurant_waste_bins%ROWTYPE;
+  active_task_id uuid;
+  inspection_at timestamptz := coalesce(p_occurred_at, now());
+  branch_timezone text;
+  inspection_is_latest boolean;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_client_event_id::text, 0)
+  );
+  SELECT id INTO inspection_id FROM public.restaurant_waste_inspections
+  WHERE branch_id = p_branch_id AND client_event_id = p_client_event_id;
+  IF inspection_id IS NOT NULL THEN
+    RETURN jsonb_build_object('replayed', true, 'inspection_id', inspection_id);
+  END IF;
+
+  SELECT timezone INTO branch_timezone FROM public.restaurant_branches
+  WHERE id = p_branch_id AND is_active;
+  IF branch_timezone IS NULL THEN RAISE EXCEPTION 'BRANCH_NOT_FOUND'; END IF;
+
+  SELECT count(*) INTO expected_count FROM public.restaurant_waste_bins
+  WHERE branch_id = p_branch_id AND is_active;
+  IF jsonb_typeof(p_results) <> 'array' THEN RAISE EXCEPTION 'INVALID_INSPECTION_RESULTS'; END IF;
+  SELECT count(DISTINCT item->>'bin_id') INTO supplied_count
+  FROM jsonb_array_elements(p_results) AS results(item);
+  IF expected_count = 0 OR supplied_count <> expected_count OR jsonb_array_length(p_results) <> expected_count THEN
+    RAISE EXCEPTION 'INSPECTION_MUST_INCLUDE_EVERY_ACTIVE_BIN';
+  END IF;
+
+  INSERT INTO public.restaurant_waste_inspections(branch_id, inspector_id, client_event_id, inspected_at)
+  VALUES (p_branch_id, p_inspector_id, p_client_event_id, inspection_at) RETURNING id INTO inspection_id;
+
+  FOR result_item IN SELECT value FROM jsonb_array_elements(p_results)
+  LOOP
+    SELECT * INTO bin_row FROM public.restaurant_waste_bins
+    WHERE id = (result_item->>'bin_id')::uuid AND branch_id = p_branch_id AND is_active FOR UPDATE;
+    IF NOT FOUND OR result_item->>'state' NOT IN ('low', 'half', 'full') THEN
+      RAISE EXCEPTION 'INVALID_BIN_OR_STATE';
+    END IF;
+    inspection_is_latest := bin_row.last_inspected_at IS NULL OR inspection_at >= bin_row.last_inspected_at;
+    INSERT INTO public.restaurant_waste_inspection_results(branch_id, inspection_id, bin_id, declared_state)
+    VALUES (p_branch_id, inspection_id, bin_row.id, result_item->>'state');
+    UPDATE public.restaurant_waste_bins SET
+      last_state = CASE WHEN inspection_is_latest THEN result_item->>'state' ELSE last_state END,
+      last_inspected_at = GREATEST(COALESCE(last_inspected_at, inspection_at), inspection_at)
+    WHERE id = bin_row.id;
+
+    IF result_item->>'state' = 'full' AND inspection_is_latest THEN
+      IF bin_row.bag_change_activity_name IS NULL
+        OR bin_row.bag_change_minutes IS NULL
+        OR bin_row.bag_change_difficulty IS NULL
+        OR bin_row.bag_change_priority IS NULL THEN
+        RAISE EXCEPTION 'WASTE_TASK_POLICY_REQUIRED';
+      END IF;
+      INSERT INTO public.restaurant_tasks(
+        branch_id, waste_bin_id, scheduled_for, task_source, name, description,
+        estimated_minutes, difficulty, priority
+      ) VALUES (
+        p_branch_id, bin_row.id, (now() AT TIME ZONE branch_timezone)::date,
+        'waste', bin_row.bag_change_activity_name, 'Resultado de inspección que requiere cambio del contenedor.',
+        bin_row.bag_change_minutes, bin_row.bag_change_difficulty, bin_row.bag_change_priority
+      ) ON CONFLICT (branch_id, waste_bin_id)
+        WHERE task_source = 'waste' AND waste_bin_id IS NOT NULL AND status <> 'completed'
+        DO NOTHING;
+      SELECT id INTO active_task_id FROM public.restaurant_tasks
+      WHERE branch_id = p_branch_id AND waste_bin_id = bin_row.id AND task_source = 'waste' AND status <> 'completed';
+    END IF;
+  END LOOP;
+
+  RETURN jsonb_build_object('replayed', false, 'inspection_id', inspection_id,
+    'active_waste_task_id', active_task_id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.update_restaurant_incident(
+  p_branch_id uuid,
+  p_incident_id uuid,
+  p_actor_id uuid,
+  p_status text,
+  p_assigned_to uuid,
+  p_is_blocking boolean,
+  p_note text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  incident_row public.restaurant_incidents%ROWTYPE;
+BEGIN
+  SELECT * INTO incident_row FROM public.restaurant_incidents
+  WHERE id = p_incident_id AND branch_id = p_branch_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'INCIDENT_NOT_FOUND'; END IF;
+  IF p_status NOT IN ('open', 'in_progress', 'resolved') THEN RAISE EXCEPTION 'INVALID_INCIDENT_STATUS'; END IF;
+  UPDATE public.restaurant_incidents SET
+    status = p_status,
+    assigned_to = p_assigned_to,
+    is_blocking = p_is_blocking,
+    resolved_at = CASE WHEN p_status = 'resolved' THEN now() ELSE NULL END
+  WHERE id = p_incident_id;
+  INSERT INTO public.restaurant_incident_events(branch_id, incident_id, actor_id, event_type, note)
+  VALUES (p_branch_id, p_incident_id, p_actor_id, 'updated', nullif(trim(p_note), ''));
+  RETURN jsonb_build_object('id', p_incident_id, 'status', p_status);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.create_restaurant_incident(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_area_id uuid,
+  p_description text,
+  p_urgency text,
+  p_is_blocking boolean,
+  p_assigned_to uuid,
+  p_client_event_id uuid,
+  p_occurred_at timestamptz DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  incident_id uuid;
+  incident_at timestamptz := coalesce(p_occurred_at, now());
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_actor_id::text || p_client_event_id::text, 0)
+  );
+  SELECT id INTO incident_id FROM public.restaurant_incidents
+  WHERE branch_id = p_branch_id AND reported_by = p_actor_id AND client_event_id = p_client_event_id;
+  IF incident_id IS NOT NULL THEN RETURN incident_id; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.restaurant_memberships
+    WHERE branch_id = p_branch_id AND user_id = p_actor_id AND is_active) THEN
+    RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED';
+  END IF;
+  IF p_urgency NOT IN ('low', 'normal', 'high', 'urgent') THEN RAISE EXCEPTION 'INVALID_URGENCY'; END IF;
+  IF p_area_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.restaurant_areas WHERE id = p_area_id AND branch_id = p_branch_id
+  ) THEN RAISE EXCEPTION 'INVALID_AREA'; END IF;
+  IF p_assigned_to IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.restaurant_memberships
+    WHERE branch_id = p_branch_id AND user_id = p_assigned_to AND is_active
+  ) THEN RAISE EXCEPTION 'INVALID_ASSIGNEE'; END IF;
+  INSERT INTO public.restaurant_incidents(
+    branch_id, area_id, description, urgency, is_blocking, assigned_to, reported_by, client_event_id, created_at
+  ) VALUES (
+    p_branch_id, p_area_id, trim(p_description), p_urgency, p_is_blocking, p_assigned_to,
+    p_actor_id, p_client_event_id, incident_at
+  ) RETURNING id INTO incident_id;
+  INSERT INTO public.restaurant_incident_events(branch_id, incident_id, actor_id, event_type, occurred_at)
+  VALUES (p_branch_id, incident_id, p_actor_id, 'reported', incident_at);
+  RETURN incident_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.save_restaurant_activity_template(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_template_id uuid,
+  p_area_id uuid,
+  p_name text,
+  p_description text,
+  p_activity_type text,
+  p_schedule_days smallint[],
+  p_estimated_minutes integer,
+  p_difficulty smallint,
+  p_priority smallint,
+  p_is_divisible boolean,
+  p_interruptible boolean,
+  p_requires_evidence boolean,
+  p_is_active boolean,
+  p_position_ids uuid[],
+  p_zones jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  template_id uuid;
+  zone_item jsonb;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF p_activity_type NOT IN ('scheduled', 'conditional', 'corrective')
+    OR (p_activity_type = 'scheduled' AND cardinality(p_schedule_days) = 0)
+    OR p_estimated_minutes NOT BETWEEN 1 AND 1440
+    OR p_difficulty NOT BETWEEN 1 AND 5
+    OR p_priority NOT BETWEEN 1 AND 5 THEN
+    RAISE EXCEPTION 'INVALID_ACTIVITY_CONFIGURATION';
+  END IF;
+  IF p_area_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.restaurant_areas WHERE id = p_area_id AND branch_id = p_branch_id
+  ) THEN RAISE EXCEPTION 'INVALID_AREA'; END IF;
+  IF coalesce(cardinality(p_position_ids), 0) > 0 AND (
+    SELECT count(DISTINCT id) FROM public.restaurant_positions
+    WHERE branch_id = p_branch_id AND id = ANY(p_position_ids)
+  ) <> cardinality(p_position_ids) THEN RAISE EXCEPTION 'INVALID_POSITION'; END IF;
+  IF jsonb_typeof(coalesce(p_zones, '[]'::jsonb)) <> 'array' THEN RAISE EXCEPTION 'INVALID_ZONES'; END IF;
+
+  IF p_template_id IS NULL THEN
+    INSERT INTO public.restaurant_activity_templates(
+      branch_id, area_id, name, description, activity_type, schedule_days,
+      estimated_minutes, difficulty, priority, is_divisible, interruptible,
+      requires_evidence, is_active
+    ) VALUES (
+      p_branch_id, p_area_id, trim(p_name), nullif(trim(p_description), ''), p_activity_type, p_schedule_days,
+      p_estimated_minutes, p_difficulty, p_priority, p_is_divisible, p_interruptible,
+      p_requires_evidence, p_is_active
+    ) RETURNING id INTO template_id;
+  ELSE
+    UPDATE public.restaurant_activity_templates SET
+      area_id = p_area_id, name = trim(p_name), description = nullif(trim(p_description), ''),
+      activity_type = p_activity_type, schedule_days = p_schedule_days,
+      estimated_minutes = p_estimated_minutes, difficulty = p_difficulty, priority = p_priority,
+      is_divisible = p_is_divisible, interruptible = p_interruptible,
+      requires_evidence = p_requires_evidence, is_active = p_is_active
+    WHERE id = p_template_id AND branch_id = p_branch_id
+    RETURNING id INTO template_id;
+    IF template_id IS NULL THEN RAISE EXCEPTION 'TEMPLATE_NOT_FOUND'; END IF;
+  END IF;
+
+  DELETE FROM public.restaurant_activity_positions
+  WHERE branch_id = p_branch_id AND activity_template_id = template_id;
+  INSERT INTO public.restaurant_activity_positions(branch_id, activity_template_id, position_id)
+  SELECT p_branch_id, template_id, position_id
+  FROM unnest(coalesce(p_position_ids, ARRAY[]::uuid[])) AS positions(position_id);
+  DELETE FROM public.restaurant_activity_zones
+  WHERE branch_id = p_branch_id AND activity_template_id = template_id;
+  FOR zone_item IN SELECT value FROM jsonb_array_elements(coalesce(p_zones, '[]'::jsonb))
+  LOOP
+    INSERT INTO public.restaurant_activity_zones(
+      branch_id, activity_template_id, name, estimated_minutes, difficulty, sort_order
+    ) VALUES (
+      p_branch_id, template_id, trim(zone_item->>'name'),
+      coalesce((zone_item->>'estimated_minutes')::integer, p_estimated_minutes),
+      coalesce((zone_item->>'difficulty')::smallint, p_difficulty),
+      coalesce((zone_item->>'sort_order')::integer, 0)
+    );
+  END LOOP;
+  RETURN template_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.save_restaurant_member_positions(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_employee_id uuid,
+  p_position_ids uuid[]
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.restaurant_memberships
+    WHERE branch_id = p_branch_id AND user_id = p_employee_id AND is_active) THEN
+    RAISE EXCEPTION 'EMPLOYEE_NOT_IN_BRANCH';
+  END IF;
+  IF coalesce(cardinality(p_position_ids), 0) > 0 AND (
+    SELECT count(DISTINCT id) FROM public.restaurant_positions
+    WHERE branch_id = p_branch_id AND id = ANY(p_position_ids)
+  ) <> cardinality(p_position_ids) THEN RAISE EXCEPTION 'INVALID_POSITION'; END IF;
+  DELETE FROM public.restaurant_member_positions
+  WHERE branch_id = p_branch_id AND user_id = p_employee_id;
+  INSERT INTO public.restaurant_member_positions(branch_id, user_id, position_id)
+  SELECT p_branch_id, p_employee_id, position_id
+  FROM unnest(coalesce(p_position_ids, ARRAY[]::uuid[])) AS positions(position_id);
+  RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.save_restaurant_waste_positions(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_position_ids uuid[]
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF coalesce(cardinality(p_position_ids), 0) > 0 AND (
+    SELECT count(DISTINCT id) FROM public.restaurant_positions
+    WHERE branch_id = p_branch_id AND id = ANY(p_position_ids)
+  ) <> cardinality(p_position_ids) THEN RAISE EXCEPTION 'INVALID_POSITION'; END IF;
+  DELETE FROM public.restaurant_waste_positions WHERE branch_id = p_branch_id;
+  INSERT INTO public.restaurant_waste_positions(branch_id, position_id)
+  SELECT p_branch_id, position_id
+  FROM unnest(coalesce(p_position_ids, ARRAY[]::uuid[])) AS positions(position_id);
+  RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.save_restaurant_shift(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_employee_id uuid,
+  p_shift_date date,
+  p_start_time time,
+  p_end_time time,
+  p_status text,
+  p_breaks jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  saved_shift_id uuid;
+  shift_start integer;
+  shift_end integer;
+  break_start integer;
+  break_end integer;
+  item jsonb;
+  break_ranges int4range[] := ARRAY[]::int4range[];
+  new_range int4range;
+  old_range int4range;
+  old_shift record;
+  candidate_start timestamp without time zone;
+  candidate_end timestamp without time zone;
+  old_end timestamp without time zone;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF p_status NOT IN ('draft', 'published') OR p_start_time = p_end_time THEN
+    RAISE EXCEPTION 'INVALID_SHIFT';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.restaurant_memberships
+    WHERE branch_id = p_branch_id AND user_id = p_employee_id AND is_active) THEN
+    RAISE EXCEPTION 'EMPLOYEE_NOT_IN_BRANCH';
+  END IF;
+  IF jsonb_typeof(coalesce(p_breaks, '[]'::jsonb)) <> 'array' THEN
+    RAISE EXCEPTION 'INVALID_SHIFT_BREAK';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_employee_id::text, 0)
+  );
+  shift_start := extract(hour FROM p_start_time)::integer * 60 + extract(minute FROM p_start_time)::integer;
+  shift_end := extract(hour FROM p_end_time)::integer * 60 + extract(minute FROM p_end_time)::integer;
+  IF shift_end <= shift_start THEN shift_end := shift_end + 1440; END IF;
+
+  INSERT INTO public.restaurant_shifts(
+    branch_id, employee_id, shift_date, start_time, end_time, status, created_by
+  ) VALUES (p_branch_id, p_employee_id, p_shift_date, p_start_time, p_end_time, p_status, p_actor_id)
+  ON CONFLICT (branch_id, employee_id, shift_date, start_time, end_time)
+  DO UPDATE SET status = EXCLUDED.status, created_by = EXCLUDED.created_by
+  RETURNING id INTO saved_shift_id;
+
+  candidate_start := p_shift_date + p_start_time;
+  candidate_end := p_shift_date + p_end_time;
+  IF p_end_time <= p_start_time THEN candidate_end := candidate_end + interval '1 day'; END IF;
+  FOR old_shift IN SELECT * FROM public.restaurant_shifts
+    WHERE branch_id = p_branch_id AND employee_id = p_employee_id AND id <> saved_shift_id
+      AND status <> 'cancelled'
+      AND shift_date BETWEEN p_shift_date - 1 AND p_shift_date + 1
+  LOOP
+    old_end := old_shift.shift_date + old_shift.end_time;
+    IF old_shift.end_time <= old_shift.start_time THEN old_end := old_end + interval '1 day'; END IF;
+    IF candidate_start < old_end
+      AND old_shift.shift_date + old_shift.start_time < candidate_end THEN
+      RAISE EXCEPTION 'SHIFT_OVERLAP';
+    END IF;
+  END LOOP;
+
+  FOR item IN SELECT value FROM jsonb_array_elements(coalesce(p_breaks, '[]'::jsonb))
+  LOOP
+    break_start := extract(hour FROM (item->>'start_time')::time)::integer * 60
+      + extract(minute FROM (item->>'start_time')::time)::integer;
+    break_end := extract(hour FROM (item->>'end_time')::time)::integer * 60
+      + extract(minute FROM (item->>'end_time')::time)::integer;
+    IF break_start < shift_start THEN break_start := break_start + 1440; END IF;
+    break_end := break_end + (break_start / 1440) * 1440;
+    IF break_end <= break_start THEN break_end := break_end + 1440; END IF;
+    IF break_start < shift_start OR break_end > shift_end THEN RAISE EXCEPTION 'INVALID_SHIFT_BREAK'; END IF;
+    new_range := int4range(break_start, break_end, '[)');
+    FOREACH old_range IN ARRAY break_ranges LOOP
+      IF new_range && old_range THEN RAISE EXCEPTION 'INVALID_SHIFT_BREAK'; END IF;
+    END LOOP;
+    break_ranges := array_append(break_ranges, new_range);
+  END LOOP;
+
+  DELETE FROM public.restaurant_shift_breaks AS saved_break
+  WHERE saved_break.branch_id = p_branch_id AND saved_break.shift_id = saved_shift_id;
+  INSERT INTO public.restaurant_shift_breaks(branch_id, shift_id, start_time, end_time)
+  SELECT p_branch_id, saved_shift_id, (breaks.item->>'start_time')::time, (breaks.item->>'end_time')::time
+  FROM jsonb_array_elements(coalesce(p_breaks, '[]'::jsonb)) AS breaks(item);
+  RETURN saved_shift_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.create_restaurant_branch(
+  p_company_id uuid,
+  p_creator_id uuid,
+  p_name text,
+  p_timezone text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  branch_row public.restaurant_branches%ROWTYPE;
+BEGIN
+  IF length(trim(p_name)) < 2 OR length(trim(p_name)) > 120 THEN
+    RAISE EXCEPTION 'INVALID_BRANCH_NAME';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.users u
+    WHERE u.id = p_creator_id AND u.company_id = p_company_id
+      AND u.is_active AND u.role::text IN ('owner', 'admin')
+  ) THEN RAISE EXCEPTION 'BRANCH_ADMIN_REQUIRED'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_timezone) THEN
+    RAISE EXCEPTION 'INVALID_TIMEZONE';
+  END IF;
+
+  INSERT INTO public.restaurant_branches(company_id, name, timezone, created_by)
+  VALUES (p_company_id, trim(p_name), p_timezone, p_creator_id)
+  RETURNING * INTO branch_row;
+  INSERT INTO public.restaurant_memberships(branch_id, company_id, user_id, access_role, created_by)
+  VALUES (branch_row.id, p_company_id, p_creator_id, 'admin', p_creator_id);
+
+  RETURN branch_row.id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.materialize_restaurant_tasks(uuid, date) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.create_restaurant_task_instance(uuid, uuid, uuid, date, uuid) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.apply_restaurant_task_action(uuid, uuid, uuid, uuid, text, uuid, text, text, timestamptz) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_restaurant_waste_inspection(uuid, uuid, uuid, jsonb, timestamptz) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.update_restaurant_incident(uuid, uuid, uuid, text, uuid, boolean, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.create_restaurant_branch(uuid, uuid, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.create_restaurant_incident(uuid, uuid, uuid, text, text, boolean, uuid, uuid, timestamptz) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.save_restaurant_activity_template(uuid, uuid, uuid, uuid, text, text, text, smallint[], integer, smallint, smallint, boolean, boolean, boolean, boolean, uuid[], jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.save_restaurant_member_positions(uuid, uuid, uuid, uuid[]) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.save_restaurant_waste_positions(uuid, uuid, uuid[]) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.save_restaurant_shift(uuid, uuid, uuid, date, time, time, text, jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_restaurant_time_event(uuid, uuid, uuid, text, timestamptz, numeric, numeric, numeric) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.materialize_restaurant_tasks(uuid, date) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_restaurant_task_instance(uuid, uuid, uuid, date, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.apply_restaurant_task_action(uuid, uuid, uuid, uuid, text, uuid, text, text, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_restaurant_waste_inspection(uuid, uuid, uuid, jsonb, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.update_restaurant_incident(uuid, uuid, uuid, text, uuid, boolean, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_restaurant_branch(uuid, uuid, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_restaurant_incident(uuid, uuid, uuid, text, text, boolean, uuid, uuid, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_activity_template(uuid, uuid, uuid, uuid, text, text, text, smallint[], integer, smallint, smallint, boolean, boolean, boolean, boolean, uuid[], jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_member_positions(uuid, uuid, uuid, uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_waste_positions(uuid, uuid, uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_shift(uuid, uuid, uuid, date, time, time, text, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_restaurant_time_event(uuid, uuid, uuid, text, timestamptz, numeric, numeric, numeric) TO service_role;
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('restaurant-evidence', 'restaurant-evidence', false, 10485760,
+  ARRAY['image/jpeg', 'image/png', 'image/webp'])
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY restaurant_evidence_upload ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'restaurant-evidence'
+    AND CASE
+      WHEN (storage.foldername(name))[1] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        AND (storage.foldername(name))[2] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN private.restaurant_can_access_evidence(((storage.foldername(name))[1])::uuid, ((storage.foldername(name))[2])::uuid)
+      ELSE false
+    END
+  );
+CREATE POLICY restaurant_evidence_read ON storage.objects
+  FOR SELECT TO authenticated
+  USING (
+    bucket_id = 'restaurant-evidence'
+    AND CASE
+      WHEN (storage.foldername(name))[1] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        AND (storage.foldername(name))[2] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN private.restaurant_can_access_evidence(((storage.foldername(name))[1])::uuid, ((storage.foldername(name))[2])::uuid)
+      ELSE false
+    END
+  );
+
+ALTER PUBLICATION supabase_realtime ADD TABLE
+  public.restaurant_branches,
+  public.restaurant_tasks,
+  public.restaurant_task_parts,
+  public.restaurant_incidents,
+  public.restaurant_waste_inspections;
+
+CREATE TRIGGER restaurant_task_events_append_only
+  BEFORE UPDATE OR DELETE ON public.restaurant_task_events
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_event_mutation();
+CREATE TRIGGER restaurant_incident_events_append_only
+  BEFORE UPDATE OR DELETE ON public.restaurant_incident_events
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_event_mutation();
+CREATE TRIGGER restaurant_waste_inspections_append_only
+  BEFORE UPDATE OR DELETE ON public.restaurant_waste_inspections
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_event_mutation();
+CREATE TRIGGER restaurant_waste_results_append_only
+  BEFORE UPDATE OR DELETE ON public.restaurant_waste_inspection_results
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_event_mutation();
+CREATE TRIGGER restaurant_time_events_append_only
+  BEFORE UPDATE OR DELETE ON public.restaurant_time_events
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_event_mutation();
+-- <<< END MIGRATION: 20261017045454_pollo_movil_operations.sql
+
+-- >>> BEGIN MIGRATION: 20261017192546_restaurant_notifications.sql
+CREATE TABLE public.restaurant_notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  recipient_id uuid NOT NULL,
+  notification_type text NOT NULL CHECK (
+    notification_type IN ('task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported')
+  ),
+  title text NOT NULL,
+  body text NOT NULL,
+  entity_type text NOT NULL CHECK (entity_type IN ('task', 'incident')),
+  entity_id uuid NOT NULL,
+  data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  read_at timestamptz,
+  FOREIGN KEY (branch_id, recipient_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX restaurant_notifications_inbox_idx
+  ON public.restaurant_notifications(branch_id, recipient_id, created_at DESC);
+CREATE INDEX restaurant_notifications_unread_idx
+  ON public.restaurant_notifications(branch_id, recipient_id, created_at DESC)
+  WHERE read_at IS NULL;
+
+ALTER TABLE public.restaurant_notifications ENABLE ROW LEVEL SECURITY;
+CREATE POLICY restaurant_notifications_recipient_read
+  ON public.restaurant_notifications FOR SELECT TO authenticated
+  USING (
+    (SELECT auth.uid()) IS NOT NULL
+    AND recipient_id = (SELECT auth.uid())
+    AND private.restaurant_has_access(branch_id)
+  );
+CREATE POLICY restaurant_notifications_recipient_mark_read
+  ON public.restaurant_notifications FOR UPDATE TO authenticated
+  USING (
+    (SELECT auth.uid()) IS NOT NULL
+    AND recipient_id = (SELECT auth.uid())
+    AND private.restaurant_has_access(branch_id)
+  )
+  WITH CHECK (
+    (SELECT auth.uid()) IS NOT NULL
+    AND recipient_id = (SELECT auth.uid())
+    AND private.restaurant_has_access(branch_id)
+  );
+
+REVOKE ALL ON public.restaurant_notifications FROM anon;
+REVOKE ALL ON public.restaurant_notifications FROM authenticated;
+GRANT SELECT, UPDATE (read_at) ON public.restaurant_notifications TO authenticated;
+GRANT ALL ON public.restaurant_notifications TO service_role;
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_task_assignment()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  notify_assignment boolean := false;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    notify_assignment := NEW.assigned_to IS NOT NULL;
+  ELSE
+    notify_assignment := NEW.assigned_to IS NOT NULL
+      AND NEW.assigned_to IS DISTINCT FROM OLD.assigned_to;
+  END IF;
+
+  IF notify_assignment THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.assigned_to, 'task_assigned', 'Actividad asignada',
+      NEW.name, 'task', NEW.id,
+      pg_catalog.jsonb_build_object('task_id', NEW.id, 'scheduled_for', NEW.scheduled_for)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_task_part_assignment()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  notify_assignment boolean := false;
+  task_name text;
+  zone_name text;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    notify_assignment := NEW.assigned_to IS NOT NULL;
+  ELSE
+    notify_assignment := NEW.assigned_to IS NOT NULL
+      AND NEW.assigned_to IS DISTINCT FROM OLD.assigned_to;
+  END IF;
+
+  IF notify_assignment THEN
+    SELECT task.name, zone.name INTO task_name, zone_name
+    FROM public.restaurant_tasks AS task
+    JOIN public.restaurant_activity_zones AS zone
+      ON zone.branch_id = NEW.branch_id AND zone.id = NEW.zone_id
+    WHERE task.branch_id = NEW.branch_id AND task.id = NEW.task_id;
+
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.assigned_to, 'task_part_assigned', 'Parte de actividad asignada',
+      pg_catalog.concat_ws(' · ', task_name, zone_name), 'task', NEW.task_id,
+      pg_catalog.jsonb_build_object('task_id', NEW.task_id, 'part_id', NEW.id, 'zone_id', NEW.zone_id)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_incident_assignment()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  notify_assignment boolean := false;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    notify_assignment := NEW.assigned_to IS NOT NULL;
+  ELSE
+    notify_assignment := NEW.assigned_to IS NOT NULL
+      AND NEW.assigned_to IS DISTINCT FROM OLD.assigned_to;
+  END IF;
+
+  IF notify_assignment THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.assigned_to, 'incident_assigned', 'Incidencia asignada',
+      pg_catalog.left(NEW.description, 240), 'incident', NEW.id,
+      pg_catalog.jsonb_build_object('incident_id', NEW.id, 'urgency', NEW.urgency)
+    );
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    )
+    SELECT NEW.branch_id, member.user_id, 'incident_reported', 'Nueva incidencia',
+      pg_catalog.left(NEW.description, 240), 'incident', NEW.id,
+      pg_catalog.jsonb_build_object('incident_id', NEW.id, 'urgency', NEW.urgency)
+    FROM public.restaurant_memberships AS member
+    WHERE member.branch_id = NEW.branch_id
+      AND member.is_active
+      AND member.access_role IN ('admin', 'supervisor')
+      AND member.user_id <> NEW.reported_by
+      AND member.user_id IS DISTINCT FROM NEW.assigned_to;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_restaurant_task_assignment() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.notify_restaurant_task_part_assignment() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.notify_restaurant_incident_assignment() FROM PUBLIC, anon, authenticated;
+
+CREATE TRIGGER restaurant_task_assignment_notification
+  AFTER INSERT OR UPDATE OF assigned_to ON public.restaurant_tasks
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_task_assignment();
+CREATE TRIGGER restaurant_task_part_assignment_notification
+  AFTER INSERT OR UPDATE OF assigned_to ON public.restaurant_task_parts
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_task_part_assignment();
+CREATE TRIGGER restaurant_incident_assignment_notification
+  AFTER INSERT OR UPDATE OF assigned_to ON public.restaurant_incidents
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_incident_assignment();
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_publication_tables
+      WHERE pubname = 'supabase_realtime'
+        AND schemaname = 'public'
+        AND tablename = 'restaurant_notifications'
+    ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.restaurant_notifications;
+  END IF;
+END;
+$$;
+-- <<< END MIGRATION: 20261017192546_restaurant_notifications.sql
+
+-- >>> BEGIN MIGRATION: 20261017192911_restaurant_shift_handoffs.sql
+CREATE TABLE public.restaurant_shift_handoffs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  shift_date date NOT NULL,
+  created_by uuid NOT NULL,
+  recipient_id uuid,
+  client_event_id uuid NOT NULL,
+  handoff_note text NOT NULL DEFAULT '' CHECK (length(handoff_note) <= 1000),
+  snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+  delivered_at timestamptz NOT NULL DEFAULT now(),
+  acknowledged_by uuid,
+  acknowledged_at timestamptz,
+  FOREIGN KEY (branch_id, created_by)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, recipient_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE SET NULL (recipient_id),
+  UNIQUE (branch_id, client_event_id),
+  UNIQUE (branch_id, id),
+  CHECK ((acknowledged_by IS NULL) = (acknowledged_at IS NULL))
+);
+
+CREATE INDEX restaurant_shift_handoffs_recent_idx
+  ON public.restaurant_shift_handoffs(branch_id, shift_date DESC, delivered_at DESC);
+ALTER TABLE public.restaurant_shift_handoffs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.restaurant_shift_handoffs FROM anon, authenticated;
+GRANT SELECT ON public.restaurant_shift_handoffs TO authenticated;
+GRANT ALL ON public.restaurant_shift_handoffs TO service_role;
+CREATE POLICY restaurant_shift_handoffs_member_read
+  ON public.restaurant_shift_handoffs FOR SELECT TO authenticated
+  USING (private.restaurant_has_access(branch_id));
+
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff'));
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_handoff_delivery()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF NEW.recipient_id IS NOT NULL THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.recipient_id, 'shift_handoff_received', 'Relevo por recibir',
+      pg_catalog.concat('Revisa el relevo del turno del ', NEW.shift_date::text, '.'),
+      'handoff', NEW.id, pg_catalog.jsonb_build_object('handoff_id', NEW.id)
+    );
+  ELSE
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    )
+    SELECT NEW.branch_id, member.user_id, 'shift_handoff_received', 'Relevo por recibir',
+      pg_catalog.concat('Revisa el relevo del turno del ', NEW.shift_date::text, '.'),
+      'handoff', NEW.id, pg_catalog.jsonb_build_object('handoff_id', NEW.id)
+    FROM public.restaurant_memberships AS member
+    WHERE member.branch_id = NEW.branch_id
+      AND member.is_active
+      AND member.access_role IN ('admin', 'supervisor')
+      AND member.user_id <> NEW.created_by;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_handoff_acknowledgement()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF OLD.acknowledged_at IS NULL AND NEW.acknowledged_at IS NOT NULL
+    AND NEW.created_by IS DISTINCT FROM NEW.acknowledged_by THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.created_by, 'shift_handoff_acknowledged', 'Relevo recibido',
+      pg_catalog.concat('El relevo del turno del ', NEW.shift_date::text, ' fue recibido.'),
+      'handoff', NEW.id,
+      pg_catalog.jsonb_build_object('handoff_id', NEW.id, 'acknowledged_by', NEW.acknowledged_by)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_restaurant_handoff_delivery() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.notify_restaurant_handoff_acknowledgement() FROM PUBLIC, anon, authenticated;
+CREATE TRIGGER restaurant_handoff_delivery_notification
+  AFTER INSERT ON public.restaurant_shift_handoffs
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_handoff_delivery();
+CREATE TRIGGER restaurant_handoff_ack_notification
+  AFTER UPDATE OF acknowledged_at ON public.restaurant_shift_handoffs
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_handoff_acknowledgement();
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_publication_tables
+      WHERE pubname = 'supabase_realtime'
+        AND schemaname = 'public'
+        AND tablename = 'restaurant_shift_handoffs'
+    ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.restaurant_shift_handoffs;
+  END IF;
+END;
+$$;
+-- <<< END MIGRATION: 20261017192911_restaurant_shift_handoffs.sql
+
+-- >>> BEGIN MIGRATION: 20261017193250_restaurant_shift_notifications.sql
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged',
+      'shift_published', 'shift_updated', 'shift_removed'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff', 'shift'));
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_shift_publication()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  schedule_text text;
+  old_schedule_text text;
+  schedule_changed boolean := false;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.status = 'published' THEN
+      schedule_text := pg_catalog.concat(
+        'Turno ', pg_catalog.to_char(NEW.shift_date, 'DD/MM/YYYY'), ' · ',
+        pg_catalog.to_char(NEW.start_time, 'HH24:MI'), '–',
+        pg_catalog.to_char(NEW.end_time, 'HH24:MI')
+      );
+      INSERT INTO public.restaurant_notifications (
+        branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+      ) VALUES (
+        NEW.branch_id, NEW.employee_id, 'shift_published', 'Nuevo turno publicado',
+        schedule_text, 'shift', NEW.id,
+        pg_catalog.jsonb_build_object('shift_id', NEW.id, 'shift_date', NEW.shift_date)
+      );
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  schedule_changed := OLD.employee_id IS DISTINCT FROM NEW.employee_id
+    OR OLD.shift_date IS DISTINCT FROM NEW.shift_date
+    OR OLD.start_time IS DISTINCT FROM NEW.start_time
+    OR OLD.end_time IS DISTINCT FROM NEW.end_time;
+
+  IF OLD.status = 'published'
+    AND (NEW.status <> 'published' OR OLD.employee_id IS DISTINCT FROM NEW.employee_id) THEN
+    old_schedule_text := pg_catalog.concat(
+      'Se retiró el turno del ', pg_catalog.to_char(OLD.shift_date, 'DD/MM/YYYY'), ' · ',
+      pg_catalog.to_char(OLD.start_time, 'HH24:MI'), '–',
+      pg_catalog.to_char(OLD.end_time, 'HH24:MI')
+    );
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      OLD.branch_id, OLD.employee_id, 'shift_removed', 'Cambio en tu turno',
+      old_schedule_text, 'shift', OLD.id,
+      pg_catalog.jsonb_build_object('shift_id', OLD.id, 'shift_date', OLD.shift_date)
+    );
+  END IF;
+
+  IF NEW.status = 'published'
+    AND (OLD.status IS DISTINCT FROM NEW.status OR schedule_changed) THEN
+    schedule_text := pg_catalog.concat(
+      'Turno ', pg_catalog.to_char(NEW.shift_date, 'DD/MM/YYYY'), ' · ',
+      pg_catalog.to_char(NEW.start_time, 'HH24:MI'), '–',
+      pg_catalog.to_char(NEW.end_time, 'HH24:MI')
+    );
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.employee_id,
+      CASE WHEN OLD.status = 'published' THEN 'shift_updated' ELSE 'shift_published' END,
+      CASE WHEN OLD.status = 'published' THEN 'Turno actualizado' ELSE 'Nuevo turno publicado' END,
+      schedule_text, 'shift', NEW.id,
+      pg_catalog.jsonb_build_object('shift_id', NEW.id, 'shift_date', NEW.shift_date)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_restaurant_shift_publication() FROM PUBLIC, anon, authenticated;
+CREATE TRIGGER restaurant_shift_publication_notification
+  AFTER INSERT OR UPDATE OF status, employee_id, shift_date, start_time, end_time
+  ON public.restaurant_shifts
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_shift_publication();
+-- <<< END MIGRATION: 20261017193250_restaurant_shift_notifications.sql
+
+-- >>> BEGIN MIGRATION: 20261017193500_restaurant_absence_notifications.sql
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged',
+      'shift_published', 'shift_updated', 'shift_removed',
+      'absence_requested', 'absence_reviewed'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff', 'shift', 'absence'));
+
+ALTER TABLE public.restaurant_absences
+  ADD COLUMN client_event_id uuid;
+ALTER TABLE public.restaurant_absences
+  ADD CONSTRAINT restaurant_absences_branch_client_event_id_key
+  UNIQUE (branch_id, client_event_id);
+
+CREATE POLICY restaurant_absences_employee_read
+  ON public.restaurant_absences FOR SELECT TO authenticated
+  USING (
+    private.restaurant_has_access(branch_id)
+    AND (employee_id = (SELECT auth.uid()) OR private.restaurant_can_manage(branch_id))
+  );
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_absence_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.status = 'pending' THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    )
+    SELECT NEW.branch_id, member.user_id, 'absence_requested', 'Solicitud de ausencia',
+      pg_catalog.concat('Solicitud del ', pg_catalog.to_char(NEW.start_date, 'DD/MM/YYYY'),
+        ' al ', pg_catalog.to_char(NEW.end_date, 'DD/MM/YYYY')),
+      'absence', NEW.id,
+      pg_catalog.jsonb_build_object('absence_id', NEW.id, 'employee_id', NEW.employee_id)
+    FROM public.restaurant_memberships AS member
+    WHERE member.branch_id = NEW.branch_id
+      AND member.is_active
+      AND member.access_role IN ('admin', 'supervisor')
+      AND member.user_id <> NEW.employee_id
+      AND member.user_id <> NEW.created_by;
+  ELSIF TG_OP = 'UPDATE' AND OLD.status = 'pending'
+    AND NEW.status IN ('approved', 'denied') THEN
+    INSERT INTO public.restaurant_notifications (
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    ) VALUES (
+      NEW.branch_id, NEW.employee_id, 'absence_reviewed',
+      CASE WHEN NEW.status = 'approved' THEN 'Ausencia aprobada' ELSE 'Solicitud de ausencia no aprobada' END,
+      pg_catalog.concat('Solicitud del ', pg_catalog.to_char(NEW.start_date, 'DD/MM/YYYY'),
+        ' al ', pg_catalog.to_char(NEW.end_date, 'DD/MM/YYYY')),
+      'absence', NEW.id,
+      pg_catalog.jsonb_build_object('absence_id', NEW.id, 'status', NEW.status)
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_restaurant_absence_change() FROM PUBLIC, anon, authenticated;
+CREATE TRIGGER restaurant_absence_insert_notification
+  AFTER INSERT ON public.restaurant_absences
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_absence_change();
+CREATE TRIGGER restaurant_absence_review_notification
+  AFTER UPDATE OF status ON public.restaurant_absences
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_absence_change();
+
+DO $$
+DECLARE
+  table_name text;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime') THEN
+    FOREACH table_name IN ARRAY ARRAY[
+      'restaurant_absences', 'restaurant_shifts', 'restaurant_waste_bins', 'restaurant_memberships'
+    ] LOOP
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND schemaname = 'public'
+          AND tablename = table_name
+      ) THEN
+        EXECUTE pg_catalog.format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', table_name);
+      END IF;
+    END LOOP;
+  END IF;
+END;
+$$;
+-- <<< END MIGRATION: 20261017193500_restaurant_absence_notifications.sql
+
+-- >>> BEGIN MIGRATION: 20261017195000_restaurant_area_inspections.sql
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged',
+      'shift_published', 'shift_updated', 'shift_removed',
+      'absence_requested', 'absence_reviewed', 'inspection_attention'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff', 'shift', 'absence', 'inspection'));
+
+CREATE TABLE public.restaurant_inspection_templates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  area_id uuid,
+  name text NOT NULL CHECK (length(trim(name)) BETWEEN 2 AND 120),
+  inspection_interval_minutes integer CHECK (
+    inspection_interval_minutes IS NULL OR inspection_interval_minutes BETWEEN 1 AND 10080
+  ),
+  last_inspected_at timestamptz,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, area_id)
+    REFERENCES public.restaurant_areas(branch_id, id) ON DELETE SET NULL (area_id),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_inspection_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  template_id uuid NOT NULL,
+  label text NOT NULL CHECK (length(trim(label)) BETWEEN 2 AND 180),
+  sort_order integer NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, template_id)
+    REFERENCES public.restaurant_inspection_templates(branch_id, id) ON DELETE CASCADE,
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_inspections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  template_id uuid NOT NULL,
+  inspector_id uuid NOT NULL,
+  client_event_id uuid NOT NULL,
+  inspection_date date NOT NULL,
+  inspected_at timestamptz NOT NULL DEFAULT now(),
+  note text NOT NULL DEFAULT '' CHECK (length(note) <= 1000),
+  needs_attention_count integer NOT NULL DEFAULT 0 CHECK (needs_attention_count >= 0),
+  FOREIGN KEY (branch_id, template_id)
+    REFERENCES public.restaurant_inspection_templates(branch_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (branch_id, inspector_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE RESTRICT,
+  UNIQUE (branch_id, client_event_id),
+  UNIQUE (branch_id, id)
+);
+
+CREATE TABLE public.restaurant_inspection_results (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL,
+  inspection_id uuid NOT NULL,
+  item_id uuid NOT NULL,
+  item_label text NOT NULL,
+  result_state text NOT NULL CHECK (result_state IN ('ok', 'needs_attention', 'not_applicable')),
+  note text NOT NULL DEFAULT '' CHECK (length(note) <= 500),
+  FOREIGN KEY (branch_id, inspection_id)
+    REFERENCES public.restaurant_inspections(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, item_id)
+    REFERENCES public.restaurant_inspection_items(branch_id, id) ON DELETE RESTRICT,
+  UNIQUE (inspection_id, item_id)
+);
+
+CREATE INDEX restaurant_inspection_templates_branch_idx
+  ON public.restaurant_inspection_templates(branch_id, is_active, name);
+CREATE INDEX restaurant_inspection_items_template_idx
+  ON public.restaurant_inspection_items(branch_id, template_id, is_active, sort_order);
+CREATE INDEX restaurant_inspections_recent_idx
+  ON public.restaurant_inspections(branch_id, inspected_at DESC);
+CREATE INDEX restaurant_inspections_template_idx
+  ON public.restaurant_inspections(branch_id, template_id, inspected_at DESC);
+CREATE INDEX restaurant_inspection_results_inspection_idx
+  ON public.restaurant_inspection_results(branch_id, inspection_id, result_state);
+
+ALTER TABLE public.restaurant_inspection_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.restaurant_inspection_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.restaurant_inspections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.restaurant_inspection_results ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.restaurant_inspection_templates FROM anon, authenticated;
+REVOKE ALL ON public.restaurant_inspection_items FROM anon, authenticated;
+REVOKE ALL ON public.restaurant_inspections FROM anon, authenticated;
+REVOKE ALL ON public.restaurant_inspection_results FROM anon, authenticated;
+GRANT SELECT ON public.restaurant_inspection_templates TO authenticated;
+GRANT SELECT ON public.restaurant_inspection_items TO authenticated;
+GRANT SELECT ON public.restaurant_inspections TO authenticated;
+GRANT SELECT ON public.restaurant_inspection_results TO authenticated;
+GRANT ALL ON public.restaurant_inspection_templates TO service_role;
+GRANT ALL ON public.restaurant_inspection_items TO service_role;
+GRANT ALL ON public.restaurant_inspections TO service_role;
+GRANT ALL ON public.restaurant_inspection_results TO service_role;
+
+CREATE POLICY restaurant_inspection_templates_member_read
+  ON public.restaurant_inspection_templates FOR SELECT TO authenticated
+  USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_inspection_items_member_read
+  ON public.restaurant_inspection_items FOR SELECT TO authenticated
+  USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_inspections_member_read
+  ON public.restaurant_inspections FOR SELECT TO authenticated
+  USING (private.restaurant_has_access(branch_id));
+CREATE POLICY restaurant_inspection_results_member_read
+  ON public.restaurant_inspection_results FOR SELECT TO authenticated
+  USING (private.restaurant_has_access(branch_id));
+
+CREATE OR REPLACE FUNCTION public.save_restaurant_inspection_template(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_template_id uuid,
+  p_area_id uuid,
+  p_name text,
+  p_interval_minutes integer,
+  p_is_active boolean,
+  p_items jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  saved_id uuid;
+  item_value jsonb;
+  item_label text;
+  item_index integer := 0;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF length(trim(p_name)) NOT BETWEEN 2 AND 120
+    OR p_interval_minutes IS NOT NULL AND p_interval_minutes NOT BETWEEN 1 AND 10080
+    OR jsonb_typeof(coalesce(p_items, '[]'::jsonb)) <> 'array'
+    OR jsonb_array_length(coalesce(p_items, '[]'::jsonb)) < 1
+    OR jsonb_array_length(coalesce(p_items, '[]'::jsonb)) > 100 THEN
+    RAISE EXCEPTION 'INVALID_INSPECTION_TEMPLATE';
+  END IF;
+  IF p_area_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.restaurant_areas
+    WHERE branch_id = p_branch_id AND id = p_area_id AND is_active
+  ) THEN RAISE EXCEPTION 'INVALID_INSPECTION_AREA'; END IF;
+
+  IF p_template_id IS NULL THEN
+    INSERT INTO public.restaurant_inspection_templates(
+      branch_id, area_id, name, inspection_interval_minutes, is_active, created_by
+    ) VALUES (
+      p_branch_id, p_area_id, trim(p_name), p_interval_minutes, coalesce(p_is_active, true), p_actor_id
+    ) RETURNING id INTO saved_id;
+  ELSE
+    UPDATE public.restaurant_inspection_templates SET
+      area_id = p_area_id, name = trim(p_name),
+      inspection_interval_minutes = p_interval_minutes,
+      is_active = coalesce(p_is_active, true), updated_at = now()
+    WHERE branch_id = p_branch_id AND id = p_template_id
+    RETURNING id INTO saved_id;
+    IF saved_id IS NULL THEN RAISE EXCEPTION 'INSPECTION_TEMPLATE_NOT_FOUND'; END IF;
+    UPDATE public.restaurant_inspection_items SET is_active = false
+    WHERE branch_id = p_branch_id AND template_id = saved_id AND is_active;
+  END IF;
+
+  FOR item_value IN SELECT value FROM jsonb_array_elements(coalesce(p_items, '[]'::jsonb))
+  LOOP
+    item_label := trim(coalesce(item_value->>'label', ''));
+    IF length(item_label) NOT BETWEEN 2 AND 180 THEN RAISE EXCEPTION 'INVALID_INSPECTION_ITEM'; END IF;
+    INSERT INTO public.restaurant_inspection_items(branch_id, template_id, label, sort_order)
+    VALUES (p_branch_id, saved_id, item_label, item_index);
+    item_index := item_index + 1;
+  END LOOP;
+  RETURN saved_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_restaurant_area_inspection(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_template_id uuid,
+  p_client_event_id uuid,
+  p_results jsonb,
+  p_note text DEFAULT '',
+  p_occurred_at timestamptz DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  branch_timezone text;
+  existing_row public.restaurant_inspections%ROWTYPE;
+  saved_row public.restaurant_inspections%ROWTYPE;
+  item_value jsonb;
+  selected_item public.restaurant_inspection_items%ROWTYPE;
+  item_uuid uuid;
+  result_state text;
+  result_note text;
+  active_item_count integer;
+  result_count integer;
+  distinct_item_count integer;
+  attention_count integer := 0;
+  inspection_at timestamptz := coalesce(p_occurred_at, now());
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) IS NULL THEN
+    RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED';
+  END IF;
+  IF p_client_event_id IS NULL OR jsonb_typeof(coalesce(p_results, '[]'::jsonb)) <> 'array'
+    OR jsonb_array_length(coalesce(p_results, '[]'::jsonb)) = 0
+    OR length(coalesce(p_note, '')) > 1000 THEN
+    RAISE EXCEPTION 'INVALID_INSPECTION';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || p_client_event_id::text, 0)
+  );
+  SELECT * INTO existing_row FROM public.restaurant_inspections
+  WHERE branch_id = p_branch_id AND client_event_id = p_client_event_id;
+  IF existing_row.id IS NOT NULL THEN
+    IF existing_row.inspector_id <> p_actor_id OR existing_row.template_id <> p_template_id
+      OR existing_row.note IS DISTINCT FROM trim(coalesce(p_note, ''))
+      OR (SELECT count(*) FROM public.restaurant_inspection_results
+        WHERE branch_id = p_branch_id AND inspection_id = existing_row.id)
+        <> pg_catalog.jsonb_array_length(coalesce(p_results, '[]'::jsonb))
+      OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(coalesce(p_results, '[]'::jsonb)) AS supplied(value)
+        LEFT JOIN public.restaurant_inspection_results AS recorded
+          ON recorded.branch_id = p_branch_id
+          AND recorded.inspection_id = existing_row.id
+          AND recorded.item_id = (supplied.value->>'item_id')::uuid
+        WHERE recorded.id IS NULL
+          OR recorded.result_state IS DISTINCT FROM supplied.value->>'result_state'
+          OR recorded.note IS DISTINCT FROM trim(coalesce(supplied.value->>'note', ''))
+      ) THEN
+      RAISE EXCEPTION 'IDEMPOTENCY_KEY_REUSED';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+      'inspection_id', existing_row.id, 'duplicate', true,
+      'needs_attention_count', existing_row.needs_attention_count
+    );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM public.restaurant_inspection_templates
+    WHERE branch_id = p_branch_id AND id = p_template_id AND is_active
+  ) THEN RAISE EXCEPTION 'INSPECTION_TEMPLATE_UNAVAILABLE'; END IF;
+  SELECT timezone INTO branch_timezone FROM public.restaurant_branches
+  WHERE id = p_branch_id AND is_active;
+  IF branch_timezone IS NULL THEN RAISE EXCEPTION 'BRANCH_NOT_FOUND'; END IF;
+
+  SELECT count(*) INTO active_item_count FROM public.restaurant_inspection_items
+  WHERE branch_id = p_branch_id AND template_id = p_template_id AND is_active;
+  SELECT pg_catalog.jsonb_array_length(p_results), count(DISTINCT value->>'item_id')
+    INTO result_count, distinct_item_count
+  FROM pg_catalog.jsonb_array_elements(p_results);
+  IF result_count <> active_item_count OR distinct_item_count <> result_count THEN
+    RAISE EXCEPTION 'INSPECTION_ITEMS_INCOMPLETE';
+  END IF;
+  SELECT count(*) INTO attention_count
+  FROM pg_catalog.jsonb_array_elements(p_results)
+  WHERE value->>'result_state' = 'needs_attention';
+
+  INSERT INTO public.restaurant_inspections(
+    branch_id, template_id, inspector_id, client_event_id, inspection_date, inspected_at, note,
+    needs_attention_count
+  ) VALUES (
+    p_branch_id, p_template_id, p_actor_id, p_client_event_id,
+    (inspection_at AT TIME ZONE branch_timezone)::date, inspection_at, trim(coalesce(p_note, '')),
+    attention_count
+  ) RETURNING * INTO saved_row;
+
+  FOR item_value IN SELECT value FROM pg_catalog.jsonb_array_elements(p_results)
+  LOOP
+    item_uuid := (item_value->>'item_id')::uuid;
+    SELECT * INTO selected_item FROM public.restaurant_inspection_items
+    WHERE branch_id = p_branch_id AND template_id = p_template_id
+      AND id = item_uuid AND is_active;
+    IF selected_item.id IS NULL THEN RAISE EXCEPTION 'INVALID_INSPECTION_ITEM'; END IF;
+    result_state := item_value->>'result_state';
+    IF result_state NOT IN ('ok', 'needs_attention', 'not_applicable') THEN
+      RAISE EXCEPTION 'INVALID_INSPECTION_RESULT';
+    END IF;
+    result_note := trim(coalesce(item_value->>'note', ''));
+    IF length(result_note) > 500 THEN RAISE EXCEPTION 'INVALID_INSPECTION_NOTE'; END IF;
+    INSERT INTO public.restaurant_inspection_results(
+      branch_id, inspection_id, item_id, item_label, result_state, note
+    ) VALUES (
+      p_branch_id, saved_row.id, selected_item.id, selected_item.label, result_state, result_note
+    );
+  END LOOP;
+  RETURN pg_catalog.jsonb_build_object(
+    'inspection_id', saved_row.id, 'duplicate', false,
+    'needs_attention_count', attention_count
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_inspection_attention()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  template_name text;
+BEGIN
+  UPDATE public.restaurant_inspection_templates
+  SET last_inspected_at = GREATEST(COALESCE(last_inspected_at, NEW.inspected_at), NEW.inspected_at)
+  WHERE branch_id = NEW.branch_id AND id = NEW.template_id;
+  IF NEW.needs_attention_count > 0 THEN
+    SELECT name INTO template_name FROM public.restaurant_inspection_templates
+    WHERE branch_id = NEW.branch_id AND id = NEW.template_id;
+    INSERT INTO public.restaurant_notifications(
+      branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+    )
+    SELECT NEW.branch_id, member.user_id, 'inspection_attention', 'Inspección requiere atención',
+      pg_catalog.concat(template_name, ': ', NEW.needs_attention_count, ' elemento(s) requieren revisión.'),
+      'inspection', NEW.id,
+      pg_catalog.jsonb_build_object('inspection_id', NEW.id, 'template_id', NEW.template_id,
+        'needs_attention_count', NEW.needs_attention_count)
+    FROM public.restaurant_memberships AS member
+    WHERE member.branch_id = NEW.branch_id AND member.is_active
+      AND member.access_role IN ('admin', 'supervisor')
+      AND member.user_id <> NEW.inspector_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.save_restaurant_inspection_template(uuid, uuid, uuid, uuid, text, integer, boolean, jsonb) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.record_restaurant_area_inspection(uuid, uuid, uuid, uuid, jsonb, text, timestamptz) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.notify_restaurant_inspection_attention() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_inspection_template(uuid, uuid, uuid, uuid, text, integer, boolean, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.record_restaurant_area_inspection(uuid, uuid, uuid, uuid, jsonb, text, timestamptz) TO service_role;
+
+CREATE TRIGGER restaurant_inspection_attention_notification
+  AFTER INSERT ON public.restaurant_inspections
+  FOR EACH ROW EXECUTE FUNCTION public.notify_restaurant_inspection_attention();
+
+DO $$
+DECLARE
+  table_name text;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime') THEN
+    FOREACH table_name IN ARRAY ARRAY[
+      'restaurant_inspection_templates', 'restaurant_inspection_items',
+      'restaurant_inspections', 'restaurant_inspection_results'
+    ] LOOP
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND schemaname = 'public'
+          AND tablename = table_name
+      ) THEN
+        EXECUTE pg_catalog.format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', table_name);
+      END IF;
+    END LOOP;
+  END IF;
+END;
+$$;
+-- <<< END MIGRATION: 20261017195000_restaurant_area_inspections.sql
+
+-- >>> BEGIN MIGRATION: 20261017195500_restaurant_shift_cancellation.sql
+ALTER TABLE public.restaurant_shifts
+  DROP CONSTRAINT restaurant_shifts_status_check;
+
+ALTER TABLE public.restaurant_shifts
+  ADD CONSTRAINT restaurant_shifts_status_check
+  CHECK (status IN ('draft', 'published', 'cancelled'));
+-- <<< END MIGRATION: 20261017195500_restaurant_shift_cancellation.sql
+
+-- >>> BEGIN MIGRATION: 20261017200000_restaurant_empty_branch_setup.sql
+ALTER TABLE public.restaurant_branches
+  ALTER COLUMN timezone DROP DEFAULT;
+
+CREATE OR REPLACE FUNCTION public.create_restaurant_branch(
+  p_company_id uuid,
+  p_creator_id uuid,
+  p_name text,
+  p_timezone text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  branch_row public.restaurant_branches%ROWTYPE;
+BEGIN
+  IF length(trim(p_name)) < 2 OR length(trim(p_name)) > 120 THEN
+    RAISE EXCEPTION 'INVALID_BRANCH_NAME';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.users AS u
+    WHERE u.id = p_creator_id AND u.company_id = p_company_id
+      AND u.is_active AND u.role::text IN ('owner', 'admin')
+  ) THEN
+    RAISE EXCEPTION 'BRANCH_ADMIN_REQUIRED';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_timezone
+  ) THEN
+    RAISE EXCEPTION 'INVALID_TIMEZONE';
+  END IF;
+
+  INSERT INTO public.restaurant_branches(company_id, name, timezone, created_by)
+  VALUES (p_company_id, trim(p_name), p_timezone, p_creator_id)
+  RETURNING * INTO branch_row;
+
+  INSERT INTO public.restaurant_memberships(
+    branch_id, company_id, user_id, access_role, created_by
+  ) VALUES (
+    branch_row.id, p_company_id, p_creator_id, 'admin', p_creator_id
+  );
+
+  RETURN branch_row.id;
+END;
+$$;
+-- <<< END MIGRATION: 20261017200000_restaurant_empty_branch_setup.sql
+
+-- >>> BEGIN MIGRATION: 20261017200500_explicit_activity_values.sql
+ALTER TABLE public.restaurant_activity_templates
+  ALTER COLUMN estimated_minutes DROP DEFAULT,
+  ALTER COLUMN difficulty DROP DEFAULT,
+  ALTER COLUMN priority DROP DEFAULT;
+
+ALTER TABLE public.restaurant_activity_zones
+  ALTER COLUMN difficulty DROP DEFAULT;
+
+ALTER TABLE public.restaurant_task_parts
+  ALTER COLUMN difficulty DROP DEFAULT;
+-- <<< END MIGRATION: 20261017200500_explicit_activity_values.sql
+
+-- >>> BEGIN MIGRATION: 20261017201000_restaurant_waste_task_policy.sql
+ALTER TABLE public.restaurant_waste_bins
+  ADD COLUMN IF NOT EXISTS bag_change_activity_name text,
+  ADD COLUMN IF NOT EXISTS bag_change_minutes integer,
+  ADD COLUMN IF NOT EXISTS bag_change_difficulty smallint,
+  ADD COLUMN IF NOT EXISTS bag_change_priority smallint;
+
+ALTER TABLE public.restaurant_waste_bins
+  ADD CONSTRAINT restaurant_waste_bins_task_name_check
+    CHECK (bag_change_activity_name IS NULL OR length(trim(bag_change_activity_name)) BETWEEN 2 AND 120),
+  ADD CONSTRAINT restaurant_waste_bins_task_minutes_check
+    CHECK (bag_change_minutes IS NULL OR bag_change_minutes BETWEEN 1 AND 1440),
+  ADD CONSTRAINT restaurant_waste_bins_task_difficulty_check
+    CHECK (bag_change_difficulty IS NULL OR bag_change_difficulty BETWEEN 1 AND 5),
+  ADD CONSTRAINT restaurant_waste_bins_task_priority_check
+    CHECK (bag_change_priority IS NULL OR bag_change_priority BETWEEN 1 AND 5);
+
+ALTER TABLE public.restaurant_tasks
+  ALTER COLUMN estimated_minutes DROP DEFAULT,
+  ALTER COLUMN difficulty DROP DEFAULT,
+  ALTER COLUMN priority DROP DEFAULT;
+-- <<< END MIGRATION: 20261017201000_restaurant_waste_task_policy.sql
+
+-- >>> BEGIN MIGRATION: 20261017201500_restaurant_realtime_publication.sql
+DO $$
+DECLARE
+  table_name text;
+  realtime_tables text[] := ARRAY[
+    'restaurant_branches',
+    'restaurant_areas',
+    'restaurant_positions',
+    'restaurant_memberships',
+    'restaurant_shifts',
+    'restaurant_shift_breaks',
+    'restaurant_activity_templates',
+    'restaurant_activity_positions',
+    'restaurant_activity_zones',
+    'restaurant_waste_positions',
+    'restaurant_tasks',
+    'restaurant_task_parts',
+    'restaurant_incidents',
+    'restaurant_absences',
+    'restaurant_waste_bins',
+    'restaurant_waste_inspections',
+    'restaurant_waste_inspection_results',
+    'restaurant_inspection_templates',
+    'restaurant_inspection_items',
+    'restaurant_inspections',
+    'restaurant_inspection_results',
+    'restaurant_shift_handoffs',
+    'restaurant_notifications'
+  ];
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime') THEN
+    RETURN;
+  END IF;
+
+  FOREACH table_name IN ARRAY realtime_tables LOOP
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_publication_tables
+      WHERE pubname = 'supabase_realtime'
+        AND schemaname = 'public'
+        AND tablename = table_name
+    ) THEN
+      EXECUTE pg_catalog.format('ALTER PUBLICATION supabase_realtime ADD TABLE public.%I', table_name);
+    END IF;
+  END LOOP;
+END;
+$$;
+
+GRANT SELECT ON TABLE
+  public.restaurant_branches,
+  public.restaurant_areas,
+  public.restaurant_positions,
+  public.restaurant_memberships,
+  public.restaurant_shifts,
+  public.restaurant_shift_breaks,
+  public.restaurant_activity_templates,
+  public.restaurant_activity_positions,
+  public.restaurant_activity_zones,
+  public.restaurant_tasks,
+  public.restaurant_task_parts,
+  public.restaurant_incidents,
+  public.restaurant_absences,
+  public.restaurant_waste_bins,
+  public.restaurant_waste_positions,
+  public.restaurant_waste_inspections,
+  public.restaurant_waste_inspection_results,
+  public.restaurant_inspection_templates,
+  public.restaurant_inspection_items,
+  public.restaurant_inspections,
+  public.restaurant_inspection_results,
+  public.restaurant_shift_handoffs,
+  public.restaurant_notifications
+TO authenticated;
+-- <<< END MIGRATION: 20261017201500_restaurant_realtime_publication.sql
+
+-- >>> BEGIN MIGRATION: 20261017202000_restaurant_inspection_notifications.sql
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged',
+      'shift_published', 'shift_updated', 'shift_removed',
+      'absence_requested', 'absence_reviewed', 'inspection_attention'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff', 'shift', 'absence', 'inspection'));
+
+CREATE OR REPLACE FUNCTION public.notify_restaurant_inspection_attention()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  template_name text;
+BEGIN
+  IF NEW.needs_attention_count <= 0 THEN RETURN NEW; END IF;
+
+  SELECT name INTO template_name
+  FROM public.restaurant_inspection_templates
+  WHERE branch_id = NEW.branch_id AND id = NEW.template_id;
+
+  INSERT INTO public.restaurant_notifications (
+    branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+  )
+  SELECT NEW.branch_id, member.user_id, 'inspection_attention',
+    'Inspección requiere seguimiento',
+    pg_catalog.concat(template_name, ' · ', NEW.needs_attention_count, ' criterio(s) requieren atención'),
+    'inspection', NEW.id,
+    pg_catalog.jsonb_build_object(
+      'inspection_id', NEW.id,
+      'template_id', NEW.template_id,
+      'needs_attention_count', NEW.needs_attention_count,
+      'inspection_date', NEW.inspection_date
+    )
+  FROM public.restaurant_memberships AS member
+  WHERE member.branch_id = NEW.branch_id
+    AND member.is_active
+    AND member.access_role IN ('admin', 'supervisor')
+    AND member.user_id <> NEW.inspector_id;
+
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.notify_restaurant_inspection_attention() FROM PUBLIC, anon, authenticated;
+-- <<< END MIGRATION: 20261017202000_restaurant_inspection_notifications.sql
+
+-- >>> BEGIN MIGRATION: 20261017202500_restaurant_shift_replacement.sql
+CREATE OR REPLACE FUNCTION public.replace_restaurant_shift(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_shift_id uuid,
+  p_employee_id uuid,
+  p_shift_date date,
+  p_start_time time,
+  p_end_time time,
+  p_status text,
+  p_breaks jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  old_shift public.restaurant_shifts%ROWTYPE;
+BEGIN
+  IF private.restaurant_user_role(p_branch_id, p_actor_id) NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+
+  SELECT * INTO old_shift
+  FROM public.restaurant_shifts
+  WHERE branch_id = p_branch_id AND id = p_shift_id
+  FOR UPDATE;
+  IF old_shift.id IS NULL OR old_shift.status = 'cancelled' THEN
+    RAISE EXCEPTION 'SHIFT_NOT_FOUND';
+  END IF;
+
+  IF old_shift.employee_id IS DISTINCT FROM p_employee_id
+    OR old_shift.shift_date IS DISTINCT FROM p_shift_date
+    OR old_shift.start_time IS DISTINCT FROM p_start_time
+    OR old_shift.end_time IS DISTINCT FROM p_end_time THEN
+    UPDATE public.restaurant_shifts SET status = 'cancelled'
+    WHERE branch_id = p_branch_id AND id = p_shift_id;
+  END IF;
+
+  RETURN public.save_restaurant_shift(
+    p_branch_id, p_actor_id, p_employee_id, p_shift_date,
+    p_start_time, p_end_time, p_status, p_breaks
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.replace_restaurant_shift(uuid, uuid, uuid, uuid, date, time, time, text, jsonb)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.replace_restaurant_shift(uuid, uuid, uuid, uuid, date, time, time, text, jsonb)
+  TO service_role;
+-- <<< END MIGRATION: 20261017202500_restaurant_shift_replacement.sql
+
+-- >>> BEGIN MIGRATION: 20261017204000_restaurant_member_lifecycle.sql
+CREATE OR REPLACE FUNCTION public.save_restaurant_member(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_employee_id uuid,
+  p_access_role text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  actor_role text;
+  target_role text;
+  target_is_active boolean;
+  branch_company_id uuid;
+BEGIN
+  actor_role := private.restaurant_user_role(p_branch_id, p_actor_id);
+  IF actor_role IS NULL OR actor_role NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF p_access_role IS NULL OR p_access_role NOT IN ('admin', 'supervisor', 'employee') THEN
+    RAISE EXCEPTION 'INVALID_MEMBER_ROLE';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || ':member-lifecycle', 0)
+  );
+
+  SELECT branch.company_id INTO branch_company_id
+  FROM public.restaurant_branches AS branch WHERE branch.id = p_branch_id;
+  IF NOT FOUND OR NOT EXISTS (
+    SELECT 1 FROM public.users AS employee
+    WHERE employee.id = p_employee_id
+      AND employee.company_id = branch_company_id
+      AND employee.is_active
+  ) THEN
+    RAISE EXCEPTION 'INVALID_EMPLOYEE';
+  END IF;
+
+  SELECT membership.access_role, membership.is_active
+    INTO target_role, target_is_active
+  FROM public.restaurant_memberships AS membership
+  WHERE membership.branch_id = p_branch_id AND membership.user_id = p_employee_id
+  FOR UPDATE;
+
+  IF actor_role = 'supervisor' AND (p_access_role = 'admin' OR target_role = 'admin') THEN
+    RAISE EXCEPTION 'BRANCH_ADMIN_REQUIRED';
+  END IF;
+
+  IF target_is_active AND target_role = 'admin' AND p_access_role <> 'admin' AND (
+    SELECT count(*) FROM public.restaurant_memberships AS admins
+    WHERE admins.branch_id = p_branch_id AND admins.is_active AND admins.access_role = 'admin'
+  ) <= 1 THEN
+    RAISE EXCEPTION 'LAST_BRANCH_ADMIN';
+  END IF;
+
+  INSERT INTO public.restaurant_memberships(
+    branch_id, company_id, user_id, access_role, is_active, created_by
+  ) VALUES (
+    p_branch_id, branch_company_id, p_employee_id, p_access_role, true, p_actor_id
+  )
+  ON CONFLICT (branch_id, user_id) DO UPDATE
+    SET access_role = EXCLUDED.access_role, is_active = true;
+
+  RETURN pg_catalog.jsonb_build_object('user_id', p_employee_id, 'access_role', p_access_role);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_restaurant_member_active(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_employee_id uuid,
+  p_is_active boolean
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  actor_role text;
+  target_role text;
+BEGIN
+  actor_role := private.restaurant_user_role(p_branch_id, p_actor_id);
+  IF actor_role IS NULL OR actor_role NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || ':member-lifecycle', 0)
+  );
+
+  SELECT membership.access_role INTO target_role
+  FROM public.restaurant_memberships AS membership
+  WHERE membership.branch_id = p_branch_id
+    AND membership.user_id = p_employee_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN RAISE EXCEPTION 'EMPLOYEE_NOT_IN_BRANCH'; END IF;
+
+  IF actor_role = 'supervisor' AND target_role = 'admin' THEN
+    RAISE EXCEPTION 'BRANCH_ADMIN_REQUIRED';
+  END IF;
+
+  IF NOT p_is_active AND EXISTS (
+    SELECT 1 FROM public.restaurant_time_sessions AS session
+    WHERE session.branch_id = p_branch_id
+      AND session.employee_id = p_employee_id
+      AND session.clock_out_at IS NULL
+  ) THEN
+    RAISE EXCEPTION 'EMPLOYEE_HAS_ACTIVE_TIME_SESSION';
+  END IF;
+
+  IF NOT p_is_active AND target_role = 'admin' AND (
+    SELECT count(*) FROM public.restaurant_memberships AS admins
+    WHERE admins.branch_id = p_branch_id
+      AND admins.is_active
+      AND admins.access_role = 'admin'
+  ) <= 1 THEN
+    RAISE EXCEPTION 'LAST_BRANCH_ADMIN';
+  END IF;
+
+  UPDATE public.restaurant_memberships
+  SET is_active = p_is_active,
+      customer_service_active = CASE WHEN p_is_active THEN customer_service_active ELSE false END
+  WHERE branch_id = p_branch_id AND user_id = p_employee_id;
+
+  IF NOT p_is_active THEN
+    UPDATE public.restaurant_task_parts
+    SET assigned_to = NULL
+    WHERE branch_id = p_branch_id
+      AND assigned_to = p_employee_id
+      AND status = 'pending';
+
+    UPDATE public.restaurant_tasks
+    SET assigned_to = NULL
+    WHERE branch_id = p_branch_id
+      AND assigned_to = p_employee_id
+      AND status = 'pending';
+  END IF;
+
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.set_restaurant_member_active(uuid, uuid, uuid, boolean)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.set_restaurant_member_active(uuid, uuid, uuid, boolean)
+  TO service_role;
+REVOKE ALL ON FUNCTION public.save_restaurant_member(uuid, uuid, uuid, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.save_restaurant_member(uuid, uuid, uuid, text)
+  TO service_role;
+-- <<< END MIGRATION: 20261017204000_restaurant_member_lifecycle.sql
+
+-- >>> BEGIN MIGRATION: 20261017213756_restaurant_assignment_policy.sql
+ALTER TABLE public.restaurant_branches
+  ADD COLUMN assignment_load_balance_weight integer NOT NULL DEFAULT 100
+    CHECK (assignment_load_balance_weight BETWEEN 0 AND 1000),
+  ADD COLUMN assignment_heavy_rotation_weight integer NOT NULL DEFAULT 60
+    CHECK (assignment_heavy_rotation_weight BETWEEN 0 AND 1000),
+  ADD COLUMN assignment_priority_weight integer NOT NULL DEFAULT 100
+    CHECK (assignment_priority_weight BETWEEN 0 AND 1000);
+
+COMMENT ON COLUMN public.restaurant_branches.assignment_load_balance_weight IS
+  'Branch-configurable soft weight for balancing weighted assigned workload; 0 disables this preference.';
+COMMENT ON COLUMN public.restaurant_branches.assignment_heavy_rotation_weight IS
+  'Branch-configurable soft penalty for assigning heavy work to employees with recent heavy-task history.';
+COMMENT ON COLUMN public.restaurant_branches.assignment_priority_weight IS
+  'Branch-configurable medium penalty multiplier for leaving higher-priority units unassigned.';
+-- <<< END MIGRATION: 20261017213756_restaurant_assignment_policy.sql
+
+-- >>> BEGIN MIGRATION: 20261017222659_fix_restaurant_incident_update_lint.sql
+CREATE OR REPLACE FUNCTION public.update_restaurant_incident(
+  p_branch_id uuid,
+  p_incident_id uuid,
+  p_actor_id uuid,
+  p_status text,
+  p_assigned_to uuid,
+  p_is_blocking boolean,
+  p_note text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  PERFORM 1 FROM public.restaurant_incidents
+  WHERE id = p_incident_id AND branch_id = p_branch_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'INCIDENT_NOT_FOUND'; END IF;
+  IF p_status NOT IN ('open', 'in_progress', 'resolved') THEN RAISE EXCEPTION 'INVALID_INCIDENT_STATUS'; END IF;
+  UPDATE public.restaurant_incidents SET
+    status = p_status,
+    assigned_to = p_assigned_to,
+    is_blocking = p_is_blocking,
+    resolved_at = CASE WHEN p_status = 'resolved' THEN now() ELSE NULL END
+  WHERE id = p_incident_id AND branch_id = p_branch_id;
+  INSERT INTO public.restaurant_incident_events(branch_id, incident_id, actor_id, event_type, note)
+  VALUES (p_branch_id, p_incident_id, p_actor_id, 'updated', nullif(trim(p_note), ''));
+  RETURN jsonb_build_object('id', p_incident_id, 'status', p_status);
+END;
+$$;
+-- <<< END MIGRATION: 20261017222659_fix_restaurant_incident_update_lint.sql
+
+-- >>> BEGIN MIGRATION: 20261017225000_restaurant_activity_and_attendance_context.sql
+CREATE INDEX IF NOT EXISTS restaurant_task_pause_context_idx
+  ON public.restaurant_task_events (branch_id, task_id, occurred_at DESC)
+  WHERE event_type = 'pause' AND note IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS restaurant_time_sessions_branch_clock_in_idx
+  ON public.restaurant_time_sessions (branch_id, clock_in_at DESC);
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = 'supabase_realtime')
+    AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_publication_tables
+      WHERE pubname = 'supabase_realtime'
+        AND schemaname = 'public'
+        AND tablename = 'restaurant_time_sessions'
+    ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.restaurant_time_sessions;
+  END IF;
+END;
+$$;
+-- <<< END MIGRATION: 20261017225000_restaurant_activity_and_attendance_context.sql
+
+-- >>> BEGIN MIGRATION: 20261018001852_restaurant_push_delivery.sql
+-- Durable, retryable delivery for mobile push notifications.
+-- The in-app restaurant_notifications inbox remains the source of truth;
+-- this table only tracks best-effort FCM delivery.
+
+CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
+CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
+
+CREATE TABLE public.restaurant_push_outbox (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  notification_id uuid NOT NULL UNIQUE
+    REFERENCES public.restaurant_notifications(id) ON DELETE CASCADE,
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  available_at timestamptz NOT NULL DEFAULT now(),
+  lease_until timestamptz,
+  sent_at timestamptz,
+  failed_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (sent_at IS NULL OR failed_at IS NULL)
+);
+
+CREATE INDEX restaurant_push_outbox_pending_idx
+  ON public.restaurant_push_outbox(available_at, created_at)
+  WHERE sent_at IS NULL AND failed_at IS NULL;
+
+ALTER TABLE public.restaurant_push_outbox ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.restaurant_push_outbox FROM anon, authenticated;
+GRANT ALL ON public.restaurant_push_outbox TO service_role;
+
+CREATE OR REPLACE FUNCTION private.dispatch_restaurant_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  supabase_url text;
+  cron_secret text;
+BEGIN
+  SELECT decrypted_secret INTO supabase_url
+  FROM vault.decrypted_secrets
+  WHERE name = 'SUPABASE_URL';
+
+  SELECT decrypted_secret INTO cron_secret
+  FROM vault.decrypted_secrets
+  WHERE name = 'CRON_SECRET';
+
+  IF supabase_url IS NOT NULL AND cron_secret IS NOT NULL THEN
+    PERFORM net.http_post(
+      url := pg_catalog.rtrim(supabase_url, '/') || '/functions/v1/restaurant_push',
+      headers := pg_catalog.jsonb_build_object(
+        'Content-Type', 'application/json',
+        'x-cron-secret', cron_secret
+      ),
+      body := pg_catalog.jsonb_build_object('notification_id', NEW.notification_id)
+    );
+  END IF;
+
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'restaurant push dispatch request could not be queued; the inbox notification remains available';
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.dispatch_restaurant_push() FROM PUBLIC, anon, authenticated;
+
+CREATE TRIGGER restaurant_push_outbox_dispatch
+  AFTER INSERT ON public.restaurant_push_outbox
+  FOR EACH ROW EXECUTE FUNCTION private.dispatch_restaurant_push();
+
+CREATE OR REPLACE FUNCTION private.enqueue_restaurant_push()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  INSERT INTO public.restaurant_push_outbox(notification_id)
+  VALUES (NEW.id)
+  ON CONFLICT (notification_id) DO NOTHING;
+  RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  RAISE WARNING 'restaurant push outbox could not be created; the inbox notification remains available';
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.enqueue_restaurant_push() FROM PUBLIC, anon, authenticated;
+
+CREATE TRIGGER restaurant_notification_enqueue_push
+  AFTER INSERT ON public.restaurant_notifications
+  FOR EACH ROW EXECUTE FUNCTION private.enqueue_restaurant_push();
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'restaurant-push-retry') THEN
+    PERFORM cron.unschedule('restaurant-push-retry');
+  END IF;
+END
+$$;
+
+SELECT cron.schedule(
+  'restaurant-push-retry',
+  '* * * * *',
+  $cron$
+    SELECT net.http_post(
+      url := pg_catalog.rtrim(
+        (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'SUPABASE_URL'),
+        '/'
+      ) || '/functions/v1/restaurant_push',
+      headers := pg_catalog.jsonb_build_object(
+        'Content-Type', 'application/json',
+        'x-cron-secret',
+        (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'CRON_SECRET')
+      ),
+      body := '{}'::jsonb
+    )
+    WHERE (SELECT count(*) FROM vault.decrypted_secrets
+           WHERE name IN ('SUPABASE_URL', 'CRON_SECRET')) = 2
+  $cron$
+);
+-- <<< END MIGRATION: 20261018001852_restaurant_push_delivery.sql
+
+-- >>> BEGIN MIGRATION: 20261018013723_restaurant_incident_update_idempotency.sql
+ALTER TABLE public.restaurant_incident_events
+  ADD COLUMN client_event_id uuid,
+  ADD COLUMN client_event_payload jsonb;
+
+CREATE UNIQUE INDEX restaurant_incident_events_client_event_unique
+  ON public.restaurant_incident_events(branch_id, client_event_id)
+  WHERE client_event_id IS NOT NULL;
+
+DROP FUNCTION IF EXISTS public.update_restaurant_incident(
+  uuid, uuid, uuid, text, uuid, boolean, text
+);
+
+CREATE FUNCTION public.update_restaurant_incident(
+  p_branch_id uuid,
+  p_incident_id uuid,
+  p_actor_id uuid,
+  p_status text,
+  p_assigned_to uuid,
+  p_is_blocking boolean,
+  p_note text,
+  p_client_event_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  incident_row public.restaurant_incidents%ROWTYPE;
+  existing_event public.restaurant_incident_events%ROWTYPE;
+  event_payload jsonb := pg_catalog.jsonb_build_object(
+    'status', p_status,
+    'assigned_to', p_assigned_to,
+    'is_blocking', p_is_blocking,
+    'note', nullif(pg_catalog.btrim(p_note), '')
+  );
+BEGIN
+  IF p_client_event_id IS NULL THEN
+    RAISE EXCEPTION 'CLIENT_EVENT_ID_REQUIRED';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(p_branch_id::text || ':' || p_client_event_id::text, 0)
+  );
+
+  SELECT * INTO existing_event
+  FROM public.restaurant_incident_events
+  WHERE branch_id = p_branch_id AND client_event_id = p_client_event_id;
+
+  IF FOUND THEN
+    IF existing_event.incident_id <> p_incident_id
+      OR existing_event.actor_id <> p_actor_id
+      OR existing_event.event_type <> 'updated'
+      OR existing_event.client_event_payload IS DISTINCT FROM event_payload THEN
+      RAISE EXCEPTION 'IDEMPOTENCY_KEY_REUSED';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+      'id', p_incident_id,
+      'status', existing_event.client_event_payload ->> 'status',
+      'duplicate', true
+    );
+  END IF;
+
+  SELECT * INTO incident_row
+  FROM public.restaurant_incidents
+  WHERE id = p_incident_id AND branch_id = p_branch_id
+  FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'INCIDENT_NOT_FOUND'; END IF;
+  IF p_status NOT IN ('open', 'in_progress', 'resolved') THEN
+    RAISE EXCEPTION 'INVALID_INCIDENT_STATUS';
+  END IF;
+
+  UPDATE public.restaurant_incidents SET
+    status = p_status,
+    assigned_to = p_assigned_to,
+    is_blocking = p_is_blocking,
+    resolved_at = CASE WHEN p_status = 'resolved' THEN now() ELSE NULL END
+  WHERE id = p_incident_id AND branch_id = p_branch_id;
+
+  INSERT INTO public.restaurant_incident_events(
+    branch_id, incident_id, actor_id, event_type, note,
+    client_event_id, client_event_payload
+  ) VALUES (
+    p_branch_id, p_incident_id, p_actor_id, 'updated',
+    nullif(pg_catalog.btrim(p_note), ''), p_client_event_id, event_payload
+  );
+
+  RETURN pg_catalog.jsonb_build_object(
+    'id', p_incident_id,
+    'status', p_status,
+    'duplicate', false
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.update_restaurant_incident(
+  uuid, uuid, uuid, text, uuid, boolean, text, uuid
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.update_restaurant_incident(
+  uuid, uuid, uuid, text, uuid, boolean, text, uuid
+) TO service_role;
+-- <<< END MIGRATION: 20261018013723_restaurant_incident_update_idempotency.sql
+
+-- >>> BEGIN MIGRATION: 20261018014456_restaurant_shift_cover_requests.sql
+CREATE TABLE public.restaurant_shift_cover_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  branch_id uuid NOT NULL REFERENCES public.restaurant_branches(id) ON DELETE CASCADE,
+  shift_id uuid NOT NULL,
+  requester_id uuid NOT NULL,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'denied', 'cancelled')),
+  note text CHECK (note IS NULL OR length(note) <= 1000),
+  decision_note text CHECK (decision_note IS NULL OR length(decision_note) <= 500),
+  replacement_employee_id uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  replacement_shift_id uuid REFERENCES public.restaurant_shifts(id) ON DELETE SET NULL,
+  client_event_id uuid NOT NULL UNIQUE,
+  reviewed_by uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  reviewed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (branch_id, shift_id)
+    REFERENCES public.restaurant_shifts(branch_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (branch_id, requester_id)
+    REFERENCES public.restaurant_memberships(branch_id, user_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX restaurant_shift_cover_one_pending_per_shift
+  ON public.restaurant_shift_cover_requests(branch_id, shift_id)
+  WHERE status = 'pending';
+CREATE INDEX restaurant_shift_cover_requester_idx
+  ON public.restaurant_shift_cover_requests(branch_id, requester_id, created_at DESC);
+CREATE INDEX restaurant_shift_cover_review_queue_idx
+  ON public.restaurant_shift_cover_requests(branch_id, created_at)
+  WHERE status = 'pending';
+CREATE INDEX restaurant_shift_cover_replacement_employee_idx
+  ON public.restaurant_shift_cover_requests(replacement_employee_id);
+CREATE INDEX restaurant_shift_cover_replacement_shift_idx
+  ON public.restaurant_shift_cover_requests(replacement_shift_id);
+CREATE INDEX restaurant_shift_cover_reviewer_idx
+  ON public.restaurant_shift_cover_requests(reviewed_by);
+
+ALTER TABLE public.restaurant_shift_cover_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.restaurant_shift_cover_requests FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.restaurant_shift_cover_requests TO service_role;
+
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_notification_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_notification_type_check CHECK (
+    notification_type IN (
+      'task_assigned', 'task_part_assigned', 'incident_assigned', 'incident_reported',
+      'shift_handoff_received', 'shift_handoff_acknowledged',
+      'shift_published', 'shift_updated', 'shift_removed',
+      'absence_requested', 'absence_reviewed', 'inspection_attention',
+      'shift_cover_requested', 'shift_cover_reviewed'
+    )
+  );
+ALTER TABLE public.restaurant_notifications
+  DROP CONSTRAINT restaurant_notifications_entity_type_check;
+ALTER TABLE public.restaurant_notifications
+  ADD CONSTRAINT restaurant_notifications_entity_type_check
+  CHECK (entity_type IN ('task', 'incident', 'handoff', 'shift', 'absence', 'inspection', 'shift_cover_request'));
+
+CREATE OR REPLACE FUNCTION public.create_restaurant_shift_cover_request(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_shift_id uuid,
+  p_client_event_id uuid,
+  p_note text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  actor_role text;
+  branch_timezone text;
+  shift_row public.restaurant_shifts%ROWTYPE;
+  existing_request public.restaurant_shift_cover_requests%ROWTYPE;
+  request_id uuid;
+BEGIN
+  actor_role := private.restaurant_user_role(p_branch_id, p_actor_id);
+  IF actor_role IS NULL THEN RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED'; END IF;
+  IF p_note IS NOT NULL AND length(trim(p_note)) > 1000 THEN
+    RAISE EXCEPTION 'INVALID_SHIFT_COVER_NOTE';
+  END IF;
+
+  SELECT branch.timezone INTO branch_timezone
+  FROM public.restaurant_branches AS branch
+  WHERE branch.id = p_branch_id AND branch.is_active;
+  IF branch_timezone IS NULL THEN RAISE EXCEPTION 'BRANCH_ACCESS_REQUIRED'; END IF;
+
+  SELECT * INTO existing_request
+  FROM public.restaurant_shift_cover_requests
+  WHERE client_event_id = p_client_event_id;
+  IF existing_request.id IS NOT NULL THEN
+    IF existing_request.branch_id IS DISTINCT FROM p_branch_id
+      OR existing_request.shift_id IS DISTINCT FROM p_shift_id
+      OR existing_request.requester_id IS DISTINCT FROM p_actor_id
+      OR existing_request.note IS DISTINCT FROM nullif(trim(p_note), '') THEN
+      RAISE EXCEPTION 'IDEMPOTENCY_KEY_REUSED';
+    END IF;
+    RETURN existing_request.id;
+  END IF;
+
+  SELECT * INTO shift_row
+  FROM public.restaurant_shifts
+  WHERE branch_id = p_branch_id AND id = p_shift_id
+  FOR UPDATE;
+  IF shift_row.id IS NULL OR shift_row.status <> 'published' THEN
+    RAISE EXCEPTION 'SHIFT_NOT_AVAILABLE';
+  END IF;
+  IF shift_row.employee_id IS DISTINCT FROM p_actor_id THEN
+    RAISE EXCEPTION 'SHIFT_NOT_OWNED_BY_REQUESTER';
+  END IF;
+  IF shift_row.shift_date + shift_row.start_time <= (now() AT TIME ZONE branch_timezone) THEN
+    RAISE EXCEPTION 'SHIFT_ALREADY_STARTED';
+  END IF;
+
+  INSERT INTO public.restaurant_shift_cover_requests(
+    branch_id, shift_id, requester_id, note, client_event_id
+  ) VALUES (
+    p_branch_id, p_shift_id, p_actor_id, nullif(trim(p_note), ''), p_client_event_id
+  )
+  ON CONFLICT DO NOTHING
+  RETURNING id INTO request_id;
+
+  IF request_id IS NULL THEN
+    SELECT * INTO existing_request
+    FROM public.restaurant_shift_cover_requests
+    WHERE client_event_id = p_client_event_id;
+    IF existing_request.id IS NOT NULL THEN
+      IF existing_request.branch_id IS DISTINCT FROM p_branch_id
+        OR existing_request.shift_id IS DISTINCT FROM p_shift_id
+        OR existing_request.requester_id IS DISTINCT FROM p_actor_id
+        OR existing_request.note IS DISTINCT FROM nullif(trim(p_note), '') THEN
+        RAISE EXCEPTION 'IDEMPOTENCY_KEY_REUSED';
+      END IF;
+      RETURN existing_request.id;
+    END IF;
+    RAISE EXCEPTION 'SHIFT_COVER_ALREADY_PENDING';
+  END IF;
+
+  INSERT INTO public.restaurant_notifications(
+    branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+  )
+  SELECT p_branch_id, member.user_id, 'shift_cover_requested', 'Solicitud para cubrir un turno',
+    pg_catalog.concat(
+      shift_row.shift_date, ' · ', pg_catalog.to_char(shift_row.start_time, 'HH24:MI'),
+      '–', pg_catalog.to_char(shift_row.end_time, 'HH24:MI')
+    ), 'shift_cover_request', request_id,
+    pg_catalog.jsonb_build_object(
+      'request_id', request_id, 'shift_id', p_shift_id, 'shift_date', shift_row.shift_date
+    )
+  FROM public.restaurant_memberships AS member
+  WHERE member.branch_id = p_branch_id AND member.is_active
+    AND member.access_role IN ('admin', 'supervisor');
+
+  RETURN request_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.review_restaurant_shift_cover_request(
+  p_branch_id uuid,
+  p_actor_id uuid,
+  p_request_id uuid,
+  p_decision text,
+  p_replacement_employee_id uuid DEFAULT NULL,
+  p_decision_note text DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  actor_role text;
+  request_row public.restaurant_shift_cover_requests%ROWTYPE;
+  old_shift public.restaurant_shifts%ROWTYPE;
+  replacement_role text;
+  replacement_is_active boolean;
+  breaks_payload jsonb;
+  new_shift_id uuid;
+BEGIN
+  actor_role := private.restaurant_user_role(p_branch_id, p_actor_id);
+  IF actor_role IS NULL OR actor_role NOT IN ('admin', 'supervisor') THEN
+    RAISE EXCEPTION 'MANAGER_REQUIRED';
+  END IF;
+  IF p_decision IS NULL OR p_decision NOT IN ('approved', 'denied') THEN
+    RAISE EXCEPTION 'INVALID_SHIFT_COVER_DECISION';
+  END IF;
+  IF p_decision_note IS NOT NULL AND length(trim(p_decision_note)) > 500 THEN
+    RAISE EXCEPTION 'INVALID_SHIFT_COVER_NOTE';
+  END IF;
+
+  SELECT * INTO request_row
+  FROM public.restaurant_shift_cover_requests
+  WHERE branch_id = p_branch_id AND id = p_request_id
+  FOR UPDATE;
+  IF request_row.id IS NULL THEN RAISE EXCEPTION 'SHIFT_COVER_REQUEST_NOT_FOUND'; END IF;
+  IF request_row.status <> 'pending' THEN RAISE EXCEPTION 'SHIFT_COVER_REQUEST_NOT_PENDING'; END IF;
+
+  SELECT * INTO old_shift
+  FROM public.restaurant_shifts
+  WHERE branch_id = p_branch_id AND id = request_row.shift_id
+  FOR UPDATE;
+  IF old_shift.id IS NULL OR old_shift.status <> 'published'
+    OR old_shift.employee_id IS DISTINCT FROM request_row.requester_id THEN
+    RAISE EXCEPTION 'SHIFT_NOT_AVAILABLE';
+  END IF;
+
+  IF p_decision = 'approved' THEN
+    IF p_replacement_employee_id IS NULL
+      OR p_replacement_employee_id = request_row.requester_id THEN
+      RAISE EXCEPTION 'INVALID_SHIFT_COVER_REPLACEMENT';
+    END IF;
+
+    SELECT member.access_role, account.is_active INTO replacement_role, replacement_is_active
+    FROM public.restaurant_memberships AS member
+    JOIN public.users AS account ON account.id = member.user_id
+    WHERE member.branch_id = p_branch_id AND member.user_id = p_replacement_employee_id
+      AND member.is_active
+    FOR SHARE OF member, account;
+    IF NOT FOUND OR replacement_role <> 'employee' OR NOT replacement_is_active THEN
+      RAISE EXCEPTION 'EMPLOYEE_NOT_ACTIVE';
+    END IF;
+
+    IF EXISTS (
+      SELECT 1 FROM public.restaurant_absences AS absence
+      WHERE absence.branch_id = p_branch_id
+        AND absence.employee_id = p_replacement_employee_id
+        AND absence.status = 'approved'
+        AND old_shift.shift_date BETWEEN absence.start_date AND absence.end_date
+    ) THEN
+      RAISE EXCEPTION 'EMPLOYEE_ABSENT';
+    END IF;
+
+    SELECT coalesce(
+      pg_catalog.jsonb_agg(
+        pg_catalog.jsonb_build_object('start_time', item.start_time, 'end_time', item.end_time)
+        ORDER BY item.start_time
+      ), '[]'::jsonb
+    ) INTO breaks_payload
+    FROM public.restaurant_shift_breaks AS item
+    WHERE item.branch_id = p_branch_id AND item.shift_id = old_shift.id;
+
+    new_shift_id := public.replace_restaurant_shift(
+      p_branch_id, p_actor_id, old_shift.id, p_replacement_employee_id,
+      old_shift.shift_date, old_shift.start_time, old_shift.end_time,
+      'published', breaks_payload
+    );
+  END IF;
+
+  UPDATE public.restaurant_shift_cover_requests
+  SET status = p_decision,
+      decision_note = nullif(trim(p_decision_note), ''),
+      replacement_employee_id = CASE WHEN p_decision = 'approved' THEN p_replacement_employee_id ELSE NULL END,
+      replacement_shift_id = new_shift_id,
+      reviewed_by = p_actor_id,
+      reviewed_at = now()
+  WHERE id = request_row.id;
+
+  INSERT INTO public.restaurant_notifications(
+    branch_id, recipient_id, notification_type, title, body, entity_type, entity_id, data
+  ) VALUES (
+    p_branch_id, request_row.requester_id, 'shift_cover_reviewed',
+    CASE WHEN p_decision = 'approved' THEN 'Cobertura confirmada' ELSE 'Solicitud de cobertura no aprobada' END,
+    CASE WHEN p_decision = 'approved'
+      THEN pg_catalog.concat(
+        'Tu turno del ', pg_catalog.to_char(old_shift.shift_date, 'DD/MM/YYYY'), ' · ',
+        pg_catalog.to_char(old_shift.start_time, 'HH24:MI'), '–',
+        pg_catalog.to_char(old_shift.end_time, 'HH24:MI'), ' fue cubierto.'
+      )
+      ELSE coalesce(nullif(trim(p_decision_note), ''), 'El gerente revisó tu solicitud.')
+    END,
+    'shift_cover_request', request_row.id,
+    pg_catalog.jsonb_build_object(
+      'request_id', request_row.id,
+      'shift_id', request_row.shift_id,
+      'replacement_shift_id', new_shift_id,
+      'shift_date', old_shift.shift_date,
+      'status', p_decision
+    )
+  );
+
+  RETURN pg_catalog.jsonb_build_object(
+    'request_id', request_row.id,
+    'status', p_decision,
+    'replacement_shift_id', new_shift_id
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_restaurant_shift_cover_request(uuid, uuid, uuid, uuid, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_restaurant_shift_cover_request(uuid, uuid, uuid, uuid, text)
+  TO service_role;
+REVOKE ALL ON FUNCTION public.review_restaurant_shift_cover_request(uuid, uuid, uuid, text, uuid, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.review_restaurant_shift_cover_request(uuid, uuid, uuid, text, uuid, text)
+  TO service_role;
+-- <<< END MIGRATION: 20261018014456_restaurant_shift_cover_requests.sql
+
+-- >>> BEGIN MIGRATION: 20261018020253_disable_legacy_gps_tracking.sql
+-- Pollo Móvil does not collect continuous GPS trails. Keep historical samples
+-- intact, but disable client and supervisor access to the legacy trail table.
+DROP POLICY IF EXISTS "Workers insert own breadcrumbs" ON public.gps_breadcrumbs;
+DROP POLICY IF EXISTS "Workers see own breadcrumbs" ON public.gps_breadcrumbs;
+DROP POLICY IF EXISTS "Supervisors see company breadcrumbs" ON public.gps_breadcrumbs;
+REVOKE ALL ON public.gps_breadcrumbs FROM PUBLIC, anon, authenticated;
+
+UPDATE public.feature_flags
+SET default_enabled = false,
+    description = 'Disabled in Pollo Móvil; location is only checked during configured attendance events.'
+WHERE flag_key = 'gps_breadcrumbs';
+
+UPDATE public.company_feature_overrides
+SET enabled = false
+WHERE flag_key = 'gps_breadcrumbs';
+
+ALTER TABLE public.feature_flags
+  ADD CONSTRAINT feature_flags_gps_breadcrumbs_disabled
+  CHECK (flag_key <> 'gps_breadcrumbs' OR default_enabled = false);
+
+ALTER TABLE public.company_feature_overrides
+  ADD CONSTRAINT company_feature_overrides_gps_breadcrumbs_disabled
+  CHECK (flag_key <> 'gps_breadcrumbs' OR enabled = false);
+-- <<< END MIGRATION: 20261018020253_disable_legacy_gps_tracking.sql
 
 -- >>> BEGIN SEED: seed.sql
 -- WARNING: Demo/test data below. Do not use this in hosted production unless intentional.
@@ -2341,7 +8198,7 @@ ON CONFLICT DO NOTHING;
 
 -- ─── RLS isolation test data: clock_events ─────────────────
 
-INSERT INTO clock_events (id, company_id, job_id, user_id, event_type, captured_at, received_at)
+INSERT INTO clock_events (id, company_id, job_id, user_id, event_subtype, occurred_at, received_at)
 VALUES (
     'ca000001-0000-0000-0000-000000000001',
     '11111111-1111-1111-1111-111111111111',
@@ -2353,7 +8210,7 @@ VALUES (
 )
 ON CONFLICT DO NOTHING;
 
-INSERT INTO clock_events (id, company_id, job_id, user_id, event_type, captured_at, received_at)
+INSERT INTO clock_events (id, company_id, job_id, user_id, event_subtype, occurred_at, received_at)
 VALUES (
     'cb000001-0000-0000-0000-000000000001',
     'b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0',
@@ -2367,35 +8224,37 @@ ON CONFLICT DO NOTHING;
 
 -- ─── RLS isolation test data: schedule_shifts ──────────────
 
-INSERT INTO schedule_shifts (id, company_id, job_id, worker_id, shift_date, start_time, end_time, status)
+INSERT INTO schedule_shifts (id, company_id, job_id, worker_id, shift_date, start_time, end_time, status, created_by)
 VALUES (
-    'sa000001-0000-0000-0000-000000000001',
+    '5a000001-0000-0000-0000-000000000001',
     '11111111-1111-1111-1111-111111111111',
     '33333333-3333-3333-3333-333333333333',
     '22222222-2222-2222-2222-222222222222',
     CURRENT_DATE,
     '08:00',
     '17:00',
-    'draft'
+    'draft',
+    '22222222-2222-2222-2222-222222222222'
 )
 ON CONFLICT DO NOTHING;
 
-INSERT INTO schedule_shifts (id, company_id, job_id, worker_id, shift_date, start_time, end_time, status)
+INSERT INTO schedule_shifts (id, company_id, job_id, worker_id, shift_date, start_time, end_time, status, created_by)
 VALUES (
-    'sb000001-0000-0000-0000-000000000001',
+    '5b000001-0000-0000-0000-000000000001',
     'b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0',
     'b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2',
     'b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1',
     CURRENT_DATE,
     '09:00',
     '18:00',
-    'draft'
+    'draft',
+    'b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1'
 )
 ON CONFLICT DO NOTHING;
 
 -- ─── RLS isolation test data: expense_events ───────────────
 
-INSERT INTO expense_events (id, company_id, user_id, job_id, amount, category, description, status)
+INSERT INTO expense_events (id, company_id, submitted_by, job_id, amount, category, notes, status)
 VALUES (
     'ea000001-0000-0000-0000-000000000001',
     '11111111-1111-1111-1111-111111111111',
@@ -2408,7 +8267,7 @@ VALUES (
 )
 ON CONFLICT DO NOTHING;
 
-INSERT INTO expense_events (id, company_id, user_id, job_id, amount, category, description, status)
+INSERT INTO expense_events (id, company_id, submitted_by, job_id, amount, category, notes, status)
 VALUES (
     'eb000001-0000-0000-0000-000000000001',
     'b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0',
@@ -2423,9 +8282,9 @@ ON CONFLICT DO NOTHING;
 
 -- ─── RLS isolation test data: pto_requests ─────────────────
 
-INSERT INTO pto_requests (id, company_id, user_id, type, start_date, end_date, status, notes)
+INSERT INTO pto_requests (id, company_id, user_id, pto_type, start_date, end_date, status, notes)
 VALUES (
-    'pa000001-0000-0000-0000-000000000001',
+    '7a000001-0000-0000-0000-000000000001',
     '11111111-1111-1111-1111-111111111111',
     '22222222-2222-2222-2222-222222222222',
     'vacation',
@@ -2436,9 +8295,9 @@ VALUES (
 )
 ON CONFLICT DO NOTHING;
 
-INSERT INTO pto_requests (id, company_id, user_id, type, start_date, end_date, status, notes)
+INSERT INTO pto_requests (id, company_id, user_id, pto_type, start_date, end_date, status, notes)
 VALUES (
-    'pb000001-0000-0000-0000-000000000001',
+    '7b000001-0000-0000-0000-000000000001',
     'b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0',
     'b1b1b1b1-b1b1-b1b1-b1b1-b1b1b1b1b1b1',
     'sick',

@@ -8,15 +8,13 @@ import {
   logRequestError,
   logRequestResult,
   logRequestStart,
-  lookupIdempotency,
   makeRequestId,
   sha256Hex,
-  storeIdempotency,
 } from "../_shared/api.ts"
 import { DEFAULT_COMPANY_SETTINGS } from "../_shared/settings.ts"
-import { OWNER_ROLE } from "../_shared/roles.ts"
 
 const ENDPOINT = "platform_admin"
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -54,20 +52,104 @@ async function logPlatformAction(
     user_agent: userAgent,
   })
 
-  if (error) {
-    console.error("[platform_audit] Failed to write audit log:", error.message)
-  }
+  if (error) throw new Error("AUDIT_WRITE_FAILED")
 }
 
-function generateTempPassword(): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%"
-  let password = ""
-  const array = new Uint8Array(16)
-  crypto.getRandomValues(array)
-  for (let i = 0; i < 16; i++) {
-    password += chars[array[i] % chars.length]
+function sanitizeAuditValue(value: unknown): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value
+  if (Array.isArray(value)) return value.map(sanitizeAuditValue)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !/(token|password|secret|claim_url|invite_link)/i.test(key))
+      .map(([key, entry]) => [key, sanitizeAuditValue(entry)])) as { [key: string]: JsonValue }
   }
-  return password
+  return null
+}
+
+async function deliverCompanyAdminInvite(
+  supabaseAdmin: any,
+  supabaseMailer: any,
+  req: Request,
+  actorId: string,
+  invite: { id: string; company_id: string; email: string; full_name: string },
+) {
+  const appUrl = (Deno.env.get("APP_URL") || "").replace(/\/+$/, "")
+  let appOrigin: string | null = null
+  try {
+    const parsed = new URL(appUrl)
+    const loopbackHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)
+    if ((parsed.protocol === "https:" || loopbackHttp) && !parsed.username && !parsed.password && !parsed.search && !parsed.hash) {
+      appOrigin = parsed.origin
+    }
+  } catch { /* a missing or malformed origin is handled as a delivery failure below */ }
+  if (!appOrigin) {
+    const { error } = await supabaseAdmin.rpc("platform_record_company_invite_delivery", {
+      p_actor_id: actorId, p_invite_id: invite.id, p_status: "delivery_failed",
+      p_error_code: "app_url_not_configured",
+    })
+    if (error) throw new Error("INVITE_STATUS_AUDIT_FAILED")
+    return { status: "delivery_failed", message: "La URL pública de la aplicación no está configurada." }
+  }
+
+  const { data: authUserId, error: lookupError } = await supabaseAdmin.rpc(
+    "platform_find_auth_user_by_email", { p_email: invite.email },
+  )
+  if (lookupError) throw new Error("INVITE_IDENTITY_LOOKUP_FAILED")
+
+  let linkedUserId: string | null = authUserId || null
+  let deliveryErrorCode: string | null = null
+  let emailError: unknown = null
+  const redirectTo = `${appOrigin}/accept-company-invite?invitation=${encodeURIComponent(invite.id)}`
+
+  if (linkedUserId) {
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from("users").select("company_id").eq("id", linkedUserId).maybeSingle()
+    if (profileError) throw new Error("INVITE_PROFILE_LOOKUP_FAILED")
+    if (profile && profile.company_id !== invite.company_id) {
+      deliveryErrorCode = "existing_account_company_conflict"
+    } else if (profile) {
+      deliveryErrorCode = "account_already_has_company_access"
+    } else {
+      const { error } = await supabaseMailer.auth.resetPasswordForEmail(invite.email, { redirectTo })
+      emailError = error
+      if (error) deliveryErrorCode = "auth_email_delivery_failed"
+    }
+  } else {
+    const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(invite.email, {
+      data: { full_name: invite.full_name },
+      redirectTo,
+    })
+    emailError = error
+    linkedUserId = data?.user?.id || null
+    if (error) deliveryErrorCode = "auth_email_delivery_failed"
+  }
+
+  const deliveryStatus = deliveryErrorCode ? "delivery_failed" : "sent"
+  const { error: stateError } = await supabaseAdmin.rpc("platform_record_company_invite_delivery", {
+    p_actor_id: actorId,
+    p_invite_id: invite.id,
+    p_status: deliveryStatus,
+    p_auth_user_id: linkedUserId,
+    p_error_code: deliveryErrorCode,
+  })
+  if (stateError) throw new Error("INVITE_STATUS_AUDIT_FAILED")
+
+  if (emailError) {
+    // Never serialize provider errors: they can contain request details.
+    console.warn("[platform_admin] Company invitation email delivery failed", {
+      request_id: makeRequestId(req), invite_id: invite.id, error_code: deliveryErrorCode,
+    })
+  }
+  return {
+    status: deliveryStatus,
+    message: deliveryErrorCode === "existing_account_company_conflict"
+      ? "El correo ya pertenece a otra empresa; no se cambió su asignación."
+      : deliveryErrorCode === "account_already_has_company_access"
+        ? "La cuenta ya tiene acceso a esta empresa."
+        : deliveryErrorCode
+          ? "No se pudo enviar el correo. La invitación quedó registrada para reintento."
+          : "Invitación enviada; el acceso se activa al validar el correo.",
+  }
 }
 
 serve(async (req) => {
@@ -77,10 +159,14 @@ serve(async (req) => {
 
   const requestId = makeRequestId(req)
   logRequestStart(ENDPOINT, requestId, req)
+  let requestAction = ""
 
   try {
     const payload = req.method === "POST" ? await req.json() : null
-    const allowUnauthedClaim = req.method === "POST" && payload?.action === "claim_invite"
+    requestAction = typeof payload?.action === "string" ? payload.action : ""
+    // All routes require a verified Supabase session. Legacy bearerless claim
+    // invitations are retired; new corporate invitations use Auth email OTP.
+    const allowUnauthedClaim = false
 
     const authHeader = req.headers.get("Authorization")
     if (!authHeader && !allowUnauthedClaim) {
@@ -94,9 +180,18 @@ serve(async (req) => {
       ? { global: { headers: { Authorization: authHeader } } }
       : undefined)
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
+    const supabaseMailer = createClient(supabaseUrl, supabaseAnonKey)
 
-    let user: { id: string } | null = null
+    let user: { id: string; email?: string } | null = null
     let platformAdmin: { id: string; role: string; is_active: boolean } | null = null
+    const requireUser = () => {
+      if (!user) throw new Error("UNAUTHORIZED")
+      return user
+    }
+    const requirePlatformAdmin = () => {
+      if (!platformAdmin) throw new Error("FORBIDDEN")
+      return platformAdmin
+    }
 
     if (!allowUnauthedClaim) {
       const jwt = authHeader!.replace("Bearer ", "")
@@ -104,16 +199,16 @@ serve(async (req) => {
       if (authError || !authData.user) {
         return errorResponse(requestId, 401, "UNAUTHORIZED", "Invalid auth token")
       }
-      user = authData.user
+      user = { id: authData.user.id, email: authData.user.email }
 
       const { data: adminRecord } = await supabaseAdmin
         .from("platform_admins")
         .select("id, role, is_active")
-        .eq("auth_user_id", user.id)
+        .eq("auth_user_id", authData.user.id)
         .eq("is_active", true)
         .single()
 
-      if (!adminRecord) {
+      if (!adminRecord || !["platform_admin", "platform_superadmin"].includes(adminRecord.role)) {
         return errorResponse(requestId, 403, "FORBIDDEN", "Not a platform administrator")
       }
 
@@ -126,6 +221,34 @@ serve(async (req) => {
     if (req.method === "GET") {
       const url = new URL(req.url)
       const action = url.searchParams.get("action")
+
+      if (action === "platform_overview") {
+        const [{ data: terms, error: termsError }, { data: companies, error: companiesError },
+          { data: licenses, error: licensesError }, { data: branchSummaries, error: branchSummaryError },
+          { count: pendingInvitations, error: invitationsError }] = await Promise.all([
+          supabaseAdmin.from("platform_license_terms").select("*").eq("singleton", true).single(),
+          supabaseAdmin.from("company_summary").select("*").order("created_at", { ascending: false }).limit(1000),
+          supabaseAdmin.from("platform_company_licenses").select("*").order("updated_at", { ascending: false }),
+          supabaseAdmin.from("platform_company_branch_summary").select("company_id, branch_count, active_branch_count"),
+          supabaseAdmin.from("platform_company_admin_invites").select("id", { count: "exact", head: true })
+            .in("status", ["pending_delivery", "sent", "delivery_failed"])
+            .gt("expires_at", new Date().toISOString()),
+        ])
+        if (termsError) throw termsError
+        if (companiesError) throw companiesError
+        if (licensesError) throw licensesError
+        if (branchSummaryError) throw branchSummaryError
+        if (invitationsError) throw invitationsError
+        const branchCounts = new Map((branchSummaries || []).map((row: { company_id: string; branch_count: number; active_branch_count: number }) =>
+          [row.company_id, { branch_count: Number(row.branch_count), active_branch_count: Number(row.active_branch_count) }]))
+        const summaries = (companies || []).map((company: Record<string, unknown>) => ({
+          ...company,
+          branch_count: branchCounts.get(String(company.id))?.branch_count || 0,
+          active_branch_count: branchCounts.get(String(company.id))?.active_branch_count || 0,
+        }))
+        return jsonResponse({ status: "success", terms, companies: summaries,
+          licenses: licenses || [], pending_invitation_count: pendingInvitations || 0, request_id: requestId }, 200, requestId)
+      }
 
       // ── list_companies ─────────────────────────────────────
       if (action === "list_companies") {
@@ -145,7 +268,7 @@ serve(async (req) => {
         if (fetchError) throw fetchError
 
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "list_companies",
           count: (companies || []).length,
         })
@@ -180,8 +303,55 @@ serve(async (req) => {
           .select("*", { count: "exact", head: true })
           .eq("company_id", companyId)
 
+        const [branchesResult, membershipsResult, licensesResult, invitesResult, auditResult] = await Promise.all([
+          supabaseAdmin.from("restaurant_branches").select("id, name, is_active, created_at, updated_at")
+            .eq("company_id", companyId).order("created_at", { ascending: false }).limit(200),
+          supabaseAdmin.from("restaurant_memberships").select("branch_id, user_id, access_role, is_active")
+            .eq("company_id", companyId).eq("is_active", true).limit(500),
+          supabaseAdmin.from("platform_company_licenses").select("*").eq("company_id", companyId).maybeSingle(),
+          supabaseAdmin.from("platform_company_admin_invites")
+            .select("id, email, full_name, status, expires_at, delivery_attempts, delivery_error_code, claimed_at, revoked_at, created_at")
+            .eq("company_id", companyId).order("created_at", { ascending: false }).limit(100),
+          supabaseAdmin.from("admin_audit_log")
+            .select("id, actor_id, action, target_type, target_id, before_json, after_json, created_at")
+            .eq("company_id", companyId).order("created_at", { ascending: false }).limit(100),
+        ])
+        if (branchesResult.error) throw branchesResult.error
+        if (membershipsResult.error) throw membershipsResult.error
+        if (licensesResult.error) throw licensesResult.error
+        if (invitesResult.error) throw invitesResult.error
+        if (auditResult.error) throw auditResult.error
+
+        const responsibleIds = [...new Set((membershipsResult.data || [])
+          .filter((membership: { access_role: string }) => membership.access_role === "admin")
+          .map((membership: { user_id: string }) => membership.user_id))]
+        const responsibleResult = responsibleIds.length
+          ? await supabaseAdmin.from("users").select("id, full_name, email").in("id", responsibleIds)
+          : { data: [], error: null }
+        if (responsibleResult.error) throw responsibleResult.error
+        const responsibleByBranch = new Map<string, Array<{ id: string; full_name: string | null; email: string | null }>>()
+        for (const membership of membershipsResult.data || []) {
+          if (membership.access_role !== "admin") continue
+          const responsible = (responsibleResult.data || []).find((candidate: {
+            id: string; full_name: string | null; email: string | null
+          }) => candidate.id === membership.user_id)
+          if (responsible) responsibleByBranch.set(membership.branch_id,
+            [...(responsibleByBranch.get(membership.branch_id) || []), responsible])
+        }
+        const branches = (branchesResult.data || []).map((branch: {
+          id: string; name: string; is_active: boolean; created_at: string; updated_at: string
+        }) => ({
+          ...branch, responsible_admins: responsibleByBranch.get(String(branch.id)) || [],
+        }))
+        const companyAudit = (auditResult.data || []).map((entry: Record<string, unknown>) => ({
+          ...entry,
+          target_id: entry.target_type === "platform_admin_invite" || typeof entry.target_id !== "string" ? null : entry.target_id,
+          before_json: sanitizeAuditValue(entry.before_json),
+          after_json: sanitizeAuditValue(entry.after_json),
+        }))
+
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "company_detail",
           company_id: companyId,
         })
@@ -189,6 +359,10 @@ serve(async (req) => {
           status: "success",
           company,
           user_count: userCount || 0,
+          branches,
+          license: licensesResult.data,
+          invitations: invitesResult.data || [],
+          audit: companyAudit,
           request_id: requestId,
         }, 200, requestId)
       }
@@ -210,7 +384,7 @@ serve(async (req) => {
         if (usersError) throw usersError
 
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "company_users",
           company_id: companyId,
           count: (users || []).length,
@@ -221,6 +395,17 @@ serve(async (req) => {
           count: (users || []).length,
           request_id: requestId,
         }, 200, requestId)
+      }
+
+      if (action === "company_admin_invites") {
+        const companyId = url.searchParams.get("company_id")
+        let query = supabaseAdmin.from("platform_company_admin_invites")
+          .select("id, company_id, email, full_name, status, expires_at, delivery_attempts, delivery_error_code, claimed_at, revoked_at, created_at")
+          .order("created_at", { ascending: false }).limit(500)
+        if (companyId) query = query.eq("company_id", companyId)
+        const { data: invitations, error: invitationsError } = await query
+        if (invitationsError) throw invitationsError
+        return jsonResponse({ status: "success", invitations: invitations || [], request_id: requestId }, 200, requestId)
       }
 
       // ── list_admins ────────────────────────────────────────
@@ -234,7 +419,7 @@ serve(async (req) => {
         if (adminsError) throw adminsError
 
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "list_admins",
           count: (admins || []).length,
         })
@@ -298,6 +483,9 @@ serve(async (req) => {
 
         const enrichedLogs = (logs || []).map((log) => ({
           ...log,
+          target_id: log.target_type === "platform_admin_invite" ? null : log.target_id,
+          before_json: sanitizeAuditValue(log.before_json),
+          after_json: sanitizeAuditValue(log.after_json),
           actor_email: log.actor_id ? (actorEmails.get(log.actor_id) || null) : null,
         }))
 
@@ -306,7 +494,7 @@ serve(async (req) => {
           : null
 
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "audit",
           count: enrichedLogs.length,
         })
@@ -333,6 +521,57 @@ serve(async (req) => {
         return errorResponse(requestId, 400, "INVALID_PAYLOAD", "action is required in POST body")
       }
 
+      if (action === "update_license_terms") {
+        if (payload.commercially_authorized !== true) {
+          return errorResponse(requestId, 400, "COMMERCIAL_AUTHORIZATION_REQUIRED", "Explicit commercial authorization is required")
+        }
+        const reference = typeof payload.authorization_reference === "string" ? payload.authorization_reference.trim() : ""
+        const integer = (value: unknown) => Number.isSafeInteger(value)
+        if (!reference || !integer(payload.package_branch_count) || !integer(payload.monthly_price_per_branch_cents)
+          || !integer(payload.additional_branch_monthly_price_cents) || !integer(payload.maximum_additional_branches)
+          || typeof payload.annual_custom_pricing_enabled !== "boolean" || typeof payload.currency !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Provide valid terms and an authorization reference")
+        }
+        const { data, error } = await supabaseAdmin.rpc("platform_update_license_terms_audited", {
+          p_actor_id: user!.id,
+          p_package_branch_count: payload.package_branch_count,
+          p_monthly_price_per_branch_cents: payload.monthly_price_per_branch_cents,
+          p_additional_branch_monthly_price_cents: payload.additional_branch_monthly_price_cents,
+          p_maximum_additional_branches: payload.maximum_additional_branches,
+          p_annual_custom_pricing_enabled: payload.annual_custom_pricing_enabled,
+          p_currency: payload.currency,
+          p_authorization_reference: reference,
+        })
+        if (error) throw error
+        return jsonResponse({ status: "success", terms: data, request_id: requestId }, 200, requestId)
+      }
+
+      if (action === "set_company_license") {
+        if (payload.commercially_authorized !== true) {
+          return errorResponse(requestId, 400, "COMMERCIAL_AUTHORIZATION_REQUIRED", "Explicit commercial authorization is required")
+        }
+        const reference = typeof payload.contract_reference === "string" ? payload.contract_reference.trim() : ""
+        if (!reference || typeof payload.company_id !== "string" || !Number.isSafeInteger(payload.package_count)
+          || !Number.isSafeInteger(payload.additional_branch_count)) {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Provide company, package quantities and contract reference")
+        }
+        const annualOverride = payload.annual_price_override_cents ?? null
+        if (annualOverride !== null && !Number.isSafeInteger(annualOverride)) {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "annual_price_override_cents must be an integer")
+        }
+        const { data, error } = await supabaseAdmin.rpc("platform_set_company_branch_license_audited", {
+          p_actor_id: user!.id,
+          p_company_id: payload.company_id,
+          p_package_count: payload.package_count,
+          p_additional_branch_count: payload.additional_branch_count,
+          p_contract_reference: reference,
+          p_annual_price_override_cents: annualOverride,
+          p_annual_approval_reference: payload.annual_approval_reference ?? null,
+        })
+        if (error) throw error
+        return jsonResponse({ status: "success", license: data, request_id: requestId }, 200, requestId)
+      }
+
       // ── create_company ─────────────────────────────────────
       if (action === "create_company") {
         const idempotencyKey = req.headers.get("Idempotency-Key")
@@ -340,130 +579,45 @@ serve(async (req) => {
           return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Idempotency-Key header is required")
         }
 
-        const owner_email = payload.owner_email || payload.admin_email
-        const owner_name = payload.owner_name || payload.admin_name
+        const adminEmail = typeof payload.admin_email === "string" ? payload.admin_email.trim().toLowerCase() : ""
+        const adminName = typeof payload.admin_name === "string" ? payload.admin_name.trim() : ""
         const { name, slug, industry, timezone } = payload
-
-        if (!name || !slug || !owner_email || !owner_name) {
+        if (typeof name !== "string" || typeof slug !== "string" || !adminEmail || !adminName) {
           return errorResponse(requestId, 400, "INVALID_PAYLOAD",
-            "name, slug, owner_email, and owner_name are required")
+            "name, slug, admin_email, and admin_name are required")
         }
-
-        const requestHash = await sha256Hex(JSON.stringify(payload))
-        const replay = await lookupIdempotency(supabaseAdmin, user.id, ENDPOINT + ":create_company", idempotencyKey, requestHash)
-        if (replay.replay) {
-          if (replay.conflict) {
-            return errorResponse(replay.requestId, 409, "CONFLICT", "Idempotency key reused with different payload")
-          }
-          return jsonResponse(replay.body, replay.status, replay.requestId)
-        }
-
-        // Check slug uniqueness
-        const { data: existingSlug } = await supabaseAdmin
-          .from("companies")
-          .select("id")
-          .eq("slug", slug)
-          .maybeSingle()
-
-        if (existingSlug) {
-          return errorResponse(requestId, 409, "CONFLICT", "Company slug already exists")
-        }
-
-        // Create company
-        const companyId = crypto.randomUUID()
-        const { error: companyError } = await supabaseAdmin
-          .from("companies")
-          .insert({
-            id: companyId,
-            name,
-            slug,
-            industry: industry || null,
-            timezone: timezone || "America/New_York",
-            status: "active",
-            settings: DEFAULT_COMPANY_SETTINGS,
-            settings_version: 1,
-          })
-
-        if (companyError) throw companyError
-
-        // Create auth user for the company admin
-        const tempPassword = generateTempPassword()
-        const { data: authUser, error: authCreateError } = await supabaseAdmin.auth.admin.createUser({
-          email: owner_email,
-          password: tempPassword,
-          email_confirm: true,
+        const requestHash = await sha256Hex(JSON.stringify({ name, slug, industry, timezone, adminEmail, adminName }))
+        const { data, error } = await supabaseAdmin.rpc("platform_create_company_with_admin_invite", {
+          p_actor_id: requireUser().id, p_name: name, p_slug: slug, p_industry: industry || null,
+          p_timezone: timezone || "America/Mexico_City", p_admin_email: adminEmail, p_admin_name: adminName,
+          p_settings: DEFAULT_COMPANY_SETTINGS, p_idempotency_key: idempotencyKey, p_request_hash: requestHash,
         })
-
-        if (authCreateError) {
-          // Rollback company creation
-          await supabaseAdmin.from("companies").delete().eq("id", companyId)
-          if (authCreateError.message?.includes("already")) {
-            return errorResponse(requestId, 409, "CONFLICT", "Admin email already has an account")
+        if (error) {
+          if (error.code === "23505" && String(error.message || "").includes("IDEMPOTENCY_CONFLICT")) {
+            return errorResponse(requestId, 409, "CONFLICT", "La clave de esta solicitud ya se utilizó con otros datos.")
           }
-          throw authCreateError
+          if (error.code === "23505") return errorResponse(requestId, 409, "CONFLICT", "El identificador de empresa ya está registrado.")
+          throw error
         }
-
-        // Create user record
-        const { error: userInsertError } = await supabaseAdmin
-          .from("users")
-          .insert({
-            id: authUser.user.id,
-            company_id: companyId,
-            full_name: owner_name,
-            email: owner_email,
-            role: OWNER_ROLE,
-            is_active: true,
+        const company = data.company
+        const invite = data.invite
+        let delivery = { status: invite.status, message: "Invitación previamente procesada." }
+        if (invite.status === "pending_delivery") {
+          delivery = await deliverCompanyAdminInvite(supabaseAdmin, supabaseMailer, req, requireUser().id, invite)
+        } else if (invite.status === "delivery_failed") {
+          const { data: prepared, error: prepareError } = await supabaseAdmin.rpc("platform_prepare_company_admin_invite_delivery", {
+            p_actor_id: requireUser().id, p_invite_id: invite.id,
           })
-
-        if (userInsertError) {
-          // Rollback auth user and company
-          await supabaseAdmin.auth.admin.deleteUser(authUser.user.id)
-          await supabaseAdmin.from("companies").delete().eq("id", companyId)
-          throw userInsertError
+          if (prepareError) throw prepareError
+          delivery = await deliverCompanyAdminInvite(supabaseAdmin, supabaseMailer, req, requireUser().id, prepared)
         }
-
-        await logPlatformAction(supabaseAdmin, req, {
-          actor_id: user.id,
-          action: "create_company",
-          company_id: companyId,
-          target_type: "company",
-          target_id: companyId,
-          after: { name, slug, owner_email },
-        })
-
-        const responseBody = {
-          status: "success",
-          company: {
-            id: companyId,
-            name,
-            slug,
-            industry: industry || null,
-            timezone: timezone || "America/New_York",
-          },
-          owner_user: {
-            id: authUser.user.id,
-            email: owner_email,
-            full_name: owner_name,
-            temp_password: tempPassword,
-          },
-          request_id: requestId,
-        }
-
-        await storeIdempotency(
-          supabaseAdmin,
-          user.id,
-          ENDPOINT + ":create_company",
-          idempotencyKey,
-          requestHash,
-          201,
-          responseBody,
-          requestId,
-        )
+        const responseBody = { status: "success", company, invitation: { id: invite.id, email: invite.email,
+          status: delivery.status, message: delivery.message }, request_id: requestId }
 
         logRequestResult(ENDPOINT, requestId, 201, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "create_company",
-          company_id: companyId,
+          company_id: company.id,
         })
         return jsonResponse(responseBody, 201, requestId)
       }
@@ -479,77 +633,14 @@ serve(async (req) => {
           return errorResponse(requestId, 400, "INVALID_PAYLOAD", "status must be 'active' or 'suspended'")
         }
 
-        // Get current state
-        const { data: company, error: companyError } = await supabaseAdmin
-          .from("companies")
-          .select("id, name, status")
-          .eq("id", company_id)
-          .single()
-
-        if (companyError || !company) {
-          return errorResponse(requestId, 404, "NOT_FOUND", "Company not found")
-        }
-
-        if (company.status === status) {
-          return errorResponse(requestId, 400, "INVALID_PAYLOAD", `Company is already '${status}'`)
-        }
-
-        // Update company status
-        const { error: updateError } = await supabaseAdmin
-          .from("companies")
-          .update({ status })
-          .eq("id", company_id)
-
-        if (updateError) throw updateError
-
-        // Ban or unban all users in the company
-        const { data: companyUsers, error: usersError } = await supabaseAdmin
-          .from("users")
-          .select("id")
-          .eq("company_id", company_id)
-
-        if (usersError) throw usersError
-
-        const banErrors: string[] = []
-        for (const companyUser of (companyUsers || [])) {
-          try {
-            if (status === "suspended") {
-              // Ban for ~100 years
-              await supabaseAdmin.auth.admin.updateUserById(companyUser.id, {
-                ban_duration: "876000h",
-              })
-            } else {
-              // Unban
-              await supabaseAdmin.auth.admin.updateUserById(companyUser.id, {
-                ban_duration: "none",
-              })
-            }
-          } catch (banErr) {
-            banErrors.push(`${companyUser.id}: ${banErr instanceof Error ? banErr.message : String(banErr)}`)
-          }
-        }
-
-        await logPlatformAction(supabaseAdmin, req, {
-          actor_id: user.id,
-          action: status === "suspended" ? "suspend_company" : "reactivate_company",
-          company_id: company_id,
-          target_type: "company",
-          target_id: company_id,
-          before: { status: company.status },
-          after: { status, users_affected: (companyUsers || []).length },
+        const { data: company, error: statusError } = await supabaseAdmin.rpc("platform_set_company_status", {
+          p_actor_id: requireUser().id, p_company_id: company_id, p_status: status,
         })
-
-        const responseBody = {
-          status: "success",
-          company_id,
-          new_status: status,
-          users_affected: (companyUsers || []).length,
-          ban_errors: banErrors.length > 0 ? banErrors : undefined,
-          request_id: requestId,
-        }
+        if (statusError) throw statusError
+        const responseBody = { status: "success", company_id, new_status: company.status, request_id: requestId }
 
         logRequestResult(ENDPOINT, requestId, 200, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "toggle_company",
           company_id,
           new_status: status,
@@ -557,10 +648,25 @@ serve(async (req) => {
         return jsonResponse(responseBody, 200, requestId)
       }
 
+      if (action === "update_company") {
+        const { company_id, name, industry, address, phone, email, timezone } = payload
+        if (typeof company_id !== "string" || typeof name !== "string" || typeof timezone !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "company_id, name, and timezone are required")
+        }
+        const { data: company, error: updateError } = await supabaseAdmin.rpc("platform_update_company", {
+          p_actor_id: requireUser().id, p_company_id: company_id, p_name: name, p_industry: industry || null,
+          p_address: address || null, p_phone: phone || null, p_email: email || null, p_timezone: timezone,
+        })
+        if (updateError) throw updateError
+        return jsonResponse({ status: "success", company, request_id: requestId }, 200, requestId)
+      }
+
       // ── create_invite ──────────────────────────────────────
       if (action === "create_invite") {
-        const { email } = payload
+        return errorResponse(requestId, 410, "ENDPOINT_RETIRED",
+          "Las invitaciones de superadministrador requieren un flujo de Auth verificado.")
 
+        const email = typeof payload.email === "string" ? payload.email.trim().toLowerCase() : ""
         if (!email) {
           return errorResponse(requestId, 400, "INVALID_PAYLOAD", "email is required")
         }
@@ -569,7 +675,7 @@ serve(async (req) => {
         const { data: existingAdmin } = await supabaseAdmin
           .from("platform_admins")
           .select("id")
-          .eq("email", email)
+          .ilike("email", email)
           .eq("is_active", true)
           .maybeSingle()
 
@@ -580,26 +686,14 @@ serve(async (req) => {
         const inviteToken = crypto.randomUUID()
         const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() // 7 days
 
-        const { error: inviteError } = await supabaseAdmin
-          .from("platform_admin_invites")
-          .insert({
-            email,
-            invite_token: inviteToken,
-            created_by: platformAdmin.id,
-            expires_at: expiresAt,
-          })
-
+        const inviteHash = await sha256Hex(inviteToken)
+        const { data: invite, error: inviteError } = await supabaseAdmin.rpc("platform_create_admin_invite", {
+          p_actor_id: requireUser().id, p_platform_admin_id: requirePlatformAdmin().id, p_email: email,
+          p_token_hash: inviteHash, p_expires_at: expiresAt,
+        })
         if (inviteError) throw inviteError
 
         const claimUrl = `${Deno.env.get("APP_URL") || ""}/claim?token=${inviteToken}`
-
-        await logPlatformAction(supabaseAdmin, req, {
-          actor_id: user.id,
-          action: "create_invite",
-          target_type: "platform_admin_invite",
-          target_id: inviteToken,
-          after: { email, expires_at: expiresAt },
-        })
 
         // NOTE: Do NOT log the claim URL or invite token — anyone with
         // log-viewer access could claim platform-admin privileges. The
@@ -610,12 +704,13 @@ serve(async (req) => {
           status: "success",
           invite_token: inviteToken,
           claim_url: claimUrl,
+          invite_id: invite.id,
           expires_at: expiresAt,
           request_id: requestId,
         }
 
         logRequestResult(ENDPOINT, requestId, 201, {
-          actor_id: user.id,
+          actor_id: requireUser().id,
           action: "create_invite",
           email,
         })
@@ -624,9 +719,14 @@ serve(async (req) => {
 
       // ── claim_invite ───────────────────────────────────────
       if (action === "claim_invite") {
+        return errorResponse(requestId, 410, "ENDPOINT_RETIRED",
+          "Las invitaciones de superadministrador requieren un flujo de Auth verificado.")
+
         const { invite_token, email, password, full_name } = payload
 
-        if (!invite_token || !email || !password || !full_name) {
+        if (typeof invite_token !== "string" || invite_token.length > 256
+          || typeof email !== "string" || !email || typeof password !== "string"
+          || typeof full_name !== "string" || !full_name) {
           return errorResponse(requestId, 400, "INVALID_PAYLOAD",
             "invite_token, email, password, and full_name are required")
         }
@@ -657,66 +757,74 @@ serve(async (req) => {
         }
 
         // Validate invite
-        const { data: invite, error: inviteError } = await supabaseAdmin
+        const inviteHash = await sha256Hex(invite_token)
+        let { data: invite, error: inviteError } = await supabaseAdmin
           .from("platform_admin_invites")
-          .select("id, email, invite_token, expires_at, claimed_at")
-          .eq("invite_token", invite_token)
-          .single()
+          .select("id, email, expires_at, claimed_at")
+          .eq("invite_token_hash", inviteHash)
+          .maybeSingle()
+
+        // Legacy invite rows retain their original token column for
+        // compatibility; no new invite writes a raw token to the database.
+        if (!invite && !inviteError) {
+          const legacy = await supabaseAdmin.from("platform_admin_invites")
+            .select("id, email, expires_at, claimed_at")
+            .eq("invite_token", invite_token).maybeSingle()
+          invite = legacy.data
+          inviteError = legacy.error
+        }
 
         if (inviteError || !invite) {
           await logPlatformAction(supabaseAdmin, req, {
             actor_id: "anonymous",
             action: "claim_invite_failed",
-            after: { reason: "invite_not_found", invite_token },
+            after: { reason: "invite_not_found" },
           })
           return errorResponse(requestId, 404, "NOT_FOUND", "Invite not found")
         }
+        const validInvite = invite!
 
-        if (invite.claimed_at) {
+        if (validInvite.claimed_at) {
           await logPlatformAction(supabaseAdmin, req, {
             actor_id: "anonymous",
             action: "claim_invite_failed",
             target_type: "platform_admin_invite",
-            target_id: invite.id,
+            target_id: validInvite.id,
             after: { reason: "already_claimed" },
           })
           return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Invite has already been claimed")
         }
 
-        if (new Date(invite.expires_at) < new Date()) {
+        if (new Date(validInvite.expires_at) < new Date()) {
           await logPlatformAction(supabaseAdmin, req, {
             actor_id: "anonymous",
             action: "claim_invite_failed",
             target_type: "platform_admin_invite",
-            target_id: invite.id,
+            target_id: validInvite.id,
             after: { reason: "invite_expired" },
           })
           return errorResponse(requestId, 400, "INVALID_PAYLOAD", "Invite has expired")
         }
 
-        if (invite.email !== email) {
+        if (validInvite.email !== email) {
           await logPlatformAction(supabaseAdmin, req, {
             actor_id: "anonymous",
             action: "claim_invite_failed",
             target_type: "platform_admin_invite",
-            target_id: invite.id,
+            target_id: validInvite.id,
             after: { reason: "email_mismatch" },
           })
           return errorResponse(requestId, 403, "FORBIDDEN", "Email does not match invite")
         }
 
-        // Check if an active platform_admin already exists for this email.
-        // We rely on the platform_admins table rather than listUsers() so
-        // that the check is scoped to platform-level access, not any auth
-        // account. A separate createUser() call below handles the
-        // "auth.users already has this email" case via its error message.
-        const { data: existingUserRecord } = await supabaseAdmin
+        const { data: existingUserRecord, error: existingUserError } = await supabaseAdmin
           .from("platform_admins")
           .select("id")
           .eq("email", email)
           .eq("is_active", true)
           .maybeSingle()
 
+        if (existingUserError) throw existingUserError
         if (existingUserRecord) {
           return errorResponse(requestId, 409, "CONFLICT", "Email is already a platform admin")
         }
@@ -729,53 +837,28 @@ serve(async (req) => {
         })
 
         if (authCreateError) {
-          if (authCreateError.message?.includes("already")) {
+          if (authCreateError?.message?.includes("already")) {
             return errorResponse(requestId, 409, "CONFLICT", "An account with this email already exists")
           }
           throw authCreateError
         }
+        const createdAuthUser = authUser.user!
 
-        // Insert into platform_admins
-        const { error: adminInsertError } = await supabaseAdmin
-          .from("platform_admins")
-          .insert({
-            auth_user_id: authUser.user.id,
-            full_name,
-            email,
-            role: "platform_admin",
-            is_active: true,
-          })
-
-        if (adminInsertError) {
-          // Rollback auth user
-          await supabaseAdmin.auth.admin.deleteUser(authUser.user.id)
-          throw adminInsertError
-        }
-
-        // Mark invite as claimed
-        const { error: claimError } = await supabaseAdmin
-          .from("platform_admin_invites")
-          .update({
-            claimed_at: new Date().toISOString(),
-          })
-          .eq("id", invite.id)
-
-        if (claimError) {
-          console.error("[platform_admin] Failed to mark invite as claimed:", claimError.message)
-        }
-
-        await logPlatformAction(supabaseAdmin, req, {
-          actor_id: authUser.user.id,
-          action: "claim_invite",
-          target_type: "platform_admin",
-          target_id: authUser.user.id,
-          after: { email, full_name, invite_token },
+        const { error: claimError } = await supabaseAdmin.rpc("platform_claim_admin_invite", {
+          p_invite_id: validInvite.id,
+          p_auth_user_id: createdAuthUser.id,
+          p_email: email,
+          p_full_name: full_name,
         })
+        if (claimError) {
+          await supabaseAdmin.auth.admin.deleteUser(createdAuthUser.id)
+          throw new Error("INVITE_CLAIM_FAILED")
+        }
 
         const responseBody = {
           status: "success",
           platform_admin: {
-            auth_user_id: authUser.user.id,
+            auth_user_id: createdAuthUser.id,
             email,
             full_name,
           },
@@ -789,14 +872,51 @@ serve(async (req) => {
         return jsonResponse(responseBody, 201, requestId)
       }
 
+      if (action === "resend_company_admin_invite") {
+        if (typeof payload.invitation_id !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "invitation_id is required")
+        }
+        const { data: invite, error: prepareError } = await supabaseAdmin.rpc("platform_prepare_company_admin_invite_delivery", {
+          p_actor_id: requireUser().id, p_invite_id: payload.invitation_id,
+        })
+        if (prepareError) throw prepareError
+        const delivery = await deliverCompanyAdminInvite(supabaseAdmin, supabaseMailer, req, requireUser().id, invite)
+        return jsonResponse({ status: "success", invitation: { id: invite.id, status: delivery.status, message: delivery.message }, request_id: requestId }, 200, requestId)
+      }
+
+      if (action === "revoke_company_admin_invite") {
+        if (typeof payload.invitation_id !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "invitation_id is required")
+        }
+        const { data: invite, error: revokeError } = await supabaseAdmin.rpc("platform_revoke_company_admin_invite", {
+          p_actor_id: requireUser().id, p_invite_id: payload.invitation_id,
+        })
+        if (revokeError) throw revokeError
+        return jsonResponse({ status: "success", invitation: { id: invite.id, status: invite.status }, request_id: requestId }, 200, requestId)
+      }
+
+      if (action === "claim_company_admin_invite") {
+        if (typeof payload.invitation_id !== "string") {
+          return errorResponse(requestId, 400, "INVALID_PAYLOAD", "invitation_id is required")
+        }
+        const { data: result, error: claimError } = await supabaseAdmin.rpc("platform_claim_company_admin_invite", {
+          p_actor_id: requireUser().id, p_invite_id: payload.invitation_id,
+        })
+        if (claimError) throw claimError
+        return jsonResponse({ status: "success", ...result, request_id: requestId }, 200, requestId)
+      }
+
       return errorResponse(requestId, 400, "INVALID_PAYLOAD",
-        "Unknown POST action. Use: create_company, toggle_company, create_invite, claim_invite")
+        "Unknown POST action")
     }
 
     return errorResponse(requestId, 405, "METHOD_NOT_ALLOWED", "Use GET or POST for /platform_admin")
   } catch (error) {
-    logRequestError(ENDPOINT, requestId, error)
-    console.error("platform_admin error:", error)
-    return errorResponse(requestId, 500, "INTERNAL_ERROR", error.message || "Internal server error")
+    const sensitiveInviteAction = ["claim_invite", "claim_company_admin_invite", "create_invite", "create_company",
+      "resend_company_admin_invite"].includes(requestAction)
+    const safeError = sensitiveInviteAction ? new Error("Platform invitation operation failed") : error
+    logRequestError(ENDPOINT, requestId, safeError, { action: requestAction || "unknown" })
+    return errorResponse(requestId, 500, "INTERNAL_ERROR",
+      sensitiveInviteAction ? "No se pudo completar la operación de invitación." : "No se pudo completar la operación.")
   }
 })

@@ -178,7 +178,7 @@ class MoreTab extends ConsumerWidget {
           // App version
           Center(
             child: Text(
-              'FieldOps AI v1.0.0',
+              'Pollo Móvil',
               style: textTheme.bodySmall?.copyWith(
                 color: palette.steel.withValues(alpha: 0.5),
               ),

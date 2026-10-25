@@ -1,55 +1,40 @@
-# FieldOps Mobile
+# Pollo Móvil
 
-Worker mobile app for FieldOps AI.
+Aplicación móvil Flutter para Android y iPhone. En computadora, el panel operativo se usa desde la web de Next.js en `apps/fieldops_web`; no es una aplicación de escritorio separada.
 
-## Hosted staging setup
+## Desarrollo local en Windows
 
-This app reads Supabase config from Dart defines. The repo now generates those
-defines from the root [`.env`](/Users/seancheick/FieldsOps_ai/.env) so web and mobile
-stay on the same backend.
+Desde la raíz `D:\Projects\pollo-movil`, inicia los servicios locales:
 
-1. Put your hosted Supabase values in the repo root `.env`
-2. Run:
-
-```bash
-cd /Users/seancheick/FieldsOps_ai
-python3 scripts/sync_runtime_env.py
+```powershell
+.\scripts\start-pollo-movil-local.ps1
 ```
 
-3. Start the app:
+Después, para Android Emulator:
 
-```bash
-cd /Users/seancheick/FieldsOps_ai/apps/fieldops_mobile
-flutter run --dart-define-from-file=env/staging.json
+```powershell
+Set-Location D:\Projects\pollo-movil\apps\fieldops_mobile
+flutter run --dart-define-from-file=env/local.json
 ```
 
-Optional:
-
-```bash
-flutter run --dart-define-from-file=env/staging.json --dart-define=SENTRY_DSN=...
-```
+El archivo local usa la dirección del host accesible desde Android Emulator. Para un teléfono físico, configura un archivo local ignorado por Git con una URL de Supabase alcanzable desde ese dispositivo.
 
 ## iPhone
 
-1. Install Xcode and Flutter
-2. Connect your iPhone with a cable
-3. Open `ios/Runner.xcworkspace` in Xcode
-4. Set your Apple Team under `Runner > Signing & Capabilities`
-5. Run:
+La compilación y ejecución nativa de iOS requieren macOS y Xcode. En un simulador iOS:
 
 ```bash
-flutter devices
-flutter run --dart-define-from-file=env/staging.json
+cd apps/fieldops_mobile
+flutter run --dart-define-from-file=env/local-ios.json
 ```
 
-## Android
+Para un iPhone físico, configura una URL de Supabase accesible desde la red del teléfono.
 
-1. Install Android Studio and the Android SDK
-2. Enable Developer Options and USB debugging
-3. Connect your Android phone
-4. Run:
+## Panel web en computadora
 
-```bash
-flutter devices
-flutter run --dart-define-from-file=env/staging.json
+```powershell
+Set-Location D:\Projects\pollo-movil\apps\fieldops_web
+npm run dev
 ```
+
+Las configuraciones `env/local*.json` son locales y no deben incluirse en commits. No agregues claves de producción al código ni a archivos versionados. El GPS y el checador son opcionales por sucursal; cuando GPS está activado, se consulta solo al marcar entrada o salida.

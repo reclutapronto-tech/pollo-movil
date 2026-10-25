@@ -1,6 +1,5 @@
 import 'package:fieldops_mobile/app/theme/app_theme.dart';
 import 'package:fieldops_mobile/features/auth/domain/user_role.dart';
-import 'package:fieldops_mobile/features/breadcrumbs/presentation/breadcrumb_playback_screen.dart';
 import 'package:fieldops_mobile/features/budgeting/presentation/job_budget_screen.dart';
 import 'package:fieldops_mobile/features/camera/data/photo_draft_repository.dart';
 import 'package:fieldops_mobile/features/camera/domain/photo_capture_result.dart';
@@ -306,27 +305,6 @@ class JobDetailScreen extends ConsumerWidget {
             },
           ),
           const SizedBox(height: 10),
-
-          _ActionTile(
-            icon: Icons.route_rounded,
-            title: 'View Route',
-            subtitle: 'GPS breadcrumb trail playback',
-            color: palette.steel,
-            onTap: () {
-              final today = DateTime.now();
-              final shiftDate =
-                  '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => BreadcrumbPlaybackScreen(
-                    shiftDate: shiftDate,
-                    jobName: job.jobName,
-                    jobId: job.jobId,
-                  ),
-                ),
-              );
-            },
-          ),
 
           if (role.canManageCrew) ...[
             const SizedBox(height: 10),

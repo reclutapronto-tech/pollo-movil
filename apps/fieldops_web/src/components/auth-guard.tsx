@@ -4,10 +4,16 @@ import { useEffect, useState } from "react";
 import { getSupabase } from "@/lib/supabase";
 import { signIn } from "@/lib/auth";
 import type { Session } from "@supabase/supabase-js";
+import { BrandLogo } from "@/components/brand-logo";
 import { useI18n } from "@/lib/i18n";
+import { usePathname, useRouter } from "next/navigation";
 
 export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  const [roleLoading, setRoleLoading] = useState(false);
+  const [roleError, setRoleError] = useState<string | null>(null);
+  const [accessCheckRevision, setAccessCheckRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
@@ -16,18 +22,48 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const [resetSent, setResetSent] = useState(false);
   const [sendingReset, setSendingReset] = useState(false);
   const { t } = useI18n();
+  const pathname = usePathname();
+  const router = useRouter();
+  const isPasswordResetRoute = pathname === "/reset-password";
+  const isCompanyInviteRoute = pathname === "/accept-company-invite";
+  const isPublicGalleryRoute = pathname.startsWith("/g/");
+  const isPlatformRoute = pathname === "/platform" || pathname.startsWith("/platform/");
+  const isPolloRoute =
+    pathname === "/restaurant" ||
+    pathname.startsWith("/restaurant/") ||
+    isPlatformRoute ||
+    isPasswordResetRoute ||
+    isCompanyInviteRoute ||
+    isPublicGalleryRoute;
 
   useEffect(() => {
     let mounted = true;
-    const supabase = getSupabase();
 
-    supabase.auth.getSession().then(({ data, error: sessionError }) => {
-      if (!mounted) return; // component unmounted before promise resolved
-      if (sessionError) {
-        setError(sessionError.message);
-      } else {
-        setSession(data.session);
-      }
+    // The reset page owns callback processing. Avoid racing its PKCE exchange
+    // or implicit-flow fragment detection with a second getSession call.
+    if (isPasswordResetRoute || isCompanyInviteRoute) {
+      setLoading(false);
+      setSession(null);
+      return () => { mounted = false; };
+    }
+
+    let supabase: ReturnType<typeof getSupabase>;
+    try {
+      supabase = getSupabase();
+    } catch {
+      setError("El servicio de inicio de sesión no está configurado. Inténtalo más tarde.");
+      setLoading(false);
+      return () => { mounted = false; };
+    }
+
+    void supabase.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!mounted) return;
+      if (sessionError) setError("No se pudo comprobar la sesión. Vuelve a intentarlo.");
+      else setSession(data.session);
+      setLoading(false);
+    }).catch(() => {
+      if (!mounted) return;
+      setError("No se pudo conectar con el servicio de inicio de sesión.");
       setLoading(false);
     });
 
@@ -41,7 +77,40 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
       mounted = false;
       listener.subscription.unsubscribe();
     };
-  }, []);
+  }, [isCompanyInviteRoute, isPasswordResetRoute]);
+
+  useEffect(() => {
+    let active = true;
+    async function resolveAccess() {
+      if (!session || isPasswordResetRoute || isCompanyInviteRoute || isPublicGalleryRoute) {
+        setPlatformAdmin(false);
+        setRoleLoading(false);
+        return;
+      }
+      setRoleLoading(true);
+      setRoleError(null);
+      try {
+        const { data, error } = await getSupabase().rpc("is_platform_admin");
+        if (error) throw error;
+        if (!active) return;
+        const isAdmin = data === true;
+        setPlatformAdmin(isAdmin);
+        if (isAdmin && !isPlatformRoute) router.replace("/platform");
+        if (!isAdmin && isPlatformRoute) router.replace("/restaurant");
+        else if (!isAdmin && !isPolloRoute) router.replace("/restaurant");
+      } catch {
+        if (!active) return;
+        // A failed role lookup is not evidence that a platform operator is a
+        // tenant user. Keep protected content hidden and let them retry.
+        setPlatformAdmin(false);
+        setRoleError("No se pudieron validar tus permisos. Vuelve a intentarlo; no se abrió ningún panel.");
+      } finally {
+        if (active) setRoleLoading(false);
+      }
+    }
+    void resolveAccess();
+    return () => { active = false; };
+  }, [accessCheckRevision, isCompanyInviteRoute, isPasswordResetRoute, isPlatformRoute, isPolloRoute, isPublicGalleryRoute, router, session]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -77,7 +146,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     }
   }
 
-  if (loading) {
+  if (loading || (session && roleLoading)) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center text-slate-500">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-amber-500" />
@@ -86,10 +155,34 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session) {
+  if (session && roleError) {
+    return (
+      <div role="alert" className="mx-auto mt-20 max-w-md rounded-2xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-950">
+        <p>{roleError}</p>
+        <button
+          type="button"
+          onClick={() => setAccessCheckRevision((revision) => revision + 1)}
+          className="mt-4 rounded-lg bg-amber-600 px-4 py-2 font-semibold text-white hover:bg-amber-700"
+        >
+          Reintentar validación
+        </button>
+      </div>
+    );
+  }
+
+  if (!session && !isPasswordResetRoute && !isCompanyInviteRoute && !isPublicGalleryRoute) {
     return (
       <div className="mx-auto mt-20 max-w-md">
         <div className="rounded-2xl border border-stone-200 bg-card p-8 shadow-sm">
+          <div className="mb-5 flex justify-center">
+            <BrandLogo
+              width={192}
+              height={192}
+              alt="Logotipo oficial de El Pollo Móvil"
+              priority
+              className="h-40 w-40 object-contain"
+            />
+          </div>
           <h2 className="text-xl font-bold text-slate-900">
             {t("auth.title")}
           </h2>
@@ -165,6 +258,18 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
         </div>
       </div>
     );
+  }
+
+  if (!isPolloRoute) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center text-sm text-slate-500">
+        Abriendo Pollo Móvil…
+      </div>
+    );
+  }
+
+  if (isPlatformRoute && !platformAdmin) {
+    return <div className="p-8 text-sm text-slate-500">Validando acceso administrativo…</div>;
   }
 
   return <>{children}</>;

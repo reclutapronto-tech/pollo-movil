@@ -12,7 +12,7 @@ import {
 type ThemePref = "light" | "dark" | "system";
 type ResolvedTheme = "light" | "dark";
 
-const STORAGE_KEY = "fieldops_theme";
+const STORAGE_KEY = "pollo-movil-theme";
 
 interface ThemeContextValue {
   pref: ThemePref;

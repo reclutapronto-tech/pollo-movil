@@ -157,8 +157,8 @@ serve(async (req) => {
             email,
             options: {
               data: metadata,
-              redirectTo: Deno.env.get("PUBLIC_WEB_URL")
-                ? `${Deno.env.get("PUBLIC_WEB_URL")}/sign-in`
+              redirectTo: Deno.env.get("PUBLIC_WEB_URL")?.trim().replace(/\/+$/, "")
+                ? `${Deno.env.get("PUBLIC_WEB_URL")!.trim().replace(/\/+$/, "")}/reset-password`
                 : undefined,
             },
           })

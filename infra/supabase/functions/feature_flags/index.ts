@@ -97,8 +97,12 @@ Deno.serve(async (req) => {
       const resolved = (flags ?? []).map((f) => ({
         flag_key: f.flag_key,
         description: f.description,
-        enabled: overrideMap.has(f.flag_key) ? overrideMap.get(f.flag_key)! : f.default_enabled,
-        source: overrideMap.has(f.flag_key) ? "company_override" : "default",
+        enabled: f.flag_key === "gps_breadcrumbs"
+          ? false
+          : overrideMap.has(f.flag_key) ? overrideMap.get(f.flag_key)! : f.default_enabled,
+        source: f.flag_key === "gps_breadcrumbs"
+          ? "disabled_in_pollo_movil"
+          : overrideMap.has(f.flag_key) ? "company_override" : "default",
       }))
 
       logRequestResult(ENDPOINT, requestId, 200, { count: resolved.length })
@@ -118,6 +122,12 @@ Deno.serve(async (req) => {
 
       if (!flagKey || typeof enabled !== "boolean") {
         return errorResponse(requestId, 400, "INVALID_PAYLOAD", "flag_key (string) and enabled (boolean) are required")
+      }
+      if (flagKey === "gps_breadcrumbs") {
+        if (enabled) {
+          return errorResponse(requestId, 403, "FEATURE_DISABLED", "Continuous GPS tracking is disabled in Pollo Móvil.")
+        }
+        return jsonResponse({ status: "ok", flag_key: flagKey, enabled: false }, 200, requestId)
       }
 
       const { data: flag } = await supabase
@@ -161,6 +171,9 @@ Deno.serve(async (req) => {
 
       if (!flagKey) {
         return errorResponse(requestId, 400, "INVALID_PAYLOAD", "flag_key query parameter is required")
+      }
+      if (flagKey === "gps_breadcrumbs") {
+        return errorResponse(requestId, 403, "FEATURE_DISABLED", "Continuous GPS tracking cannot be enabled in Pollo Móvil.")
       }
 
       const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""

@@ -1,23 +1,24 @@
-// Push notification sender utility.
-//
-// Sends FCM v1 HTTP messages to registered device tokens.
-// Requires FIREBASE_SERVICE_ACCOUNT_JSON env var with the service account key.
-//
-// Usage from an edge function:
-//   import { sendPush, sendPushToUser } from "../_shared/push.ts"
-//
-//   await sendPushToUser(supabase, userId, {
-//     title: "OT Approved",
-//     body: "Your overtime request was approved",
-//     data: { route: "/overtime", entity_id: otRequestId, category: "ot_approval" },
-//   })
+// Firebase Cloud Messaging HTTP v1 sender.
+// Requires FIREBASE_SERVICE_ACCOUNT_JSON in the Edge Function environment.
 
 import { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2"
 
-interface PushPayload {
+export interface PushPayload {
   title: string
   body: string
   data?: Record<string, string>
+}
+
+export interface PushSendResult {
+  ok: boolean
+  staleToken: boolean
+  error?: string
+}
+
+interface FirebaseServiceAccount {
+  project_id: string
+  client_email: string
+  private_key: string
 }
 
 interface FCMMessage {
@@ -25,48 +26,62 @@ interface FCMMessage {
     token: string
     notification: { title: string; body: string }
     data?: Record<string, string>
-    android?: { priority: string; notification: { channel_id: string } }
-    apns?: { payload: { aps: { sound: string; badge?: number } } }
+    android?: { priority: "HIGH" | "NORMAL" }
+    apns?: { payload: { aps: { sound: string } } }
   }
 }
 
-// Cache the OAuth2 access token (valid for ~1 hour).
 let cachedAccessToken: string | null = null
 let tokenExpiresAt = 0
 
-async function getAccessToken(): Promise<string | null> {
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = ""
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
+}
+
+function encodeJson(value: Record<string, unknown>): string {
+  return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)))
+}
+
+function loadServiceAccount(): FirebaseServiceAccount | null {
+  const raw = Deno.env.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw)
+    if (
+      typeof value.project_id !== "string" ||
+      typeof value.client_email !== "string" ||
+      typeof value.private_key !== "string"
+    ) return null
+    return value as FirebaseServiceAccount
+  } catch {
+    return null
+  }
+}
+
+async function getAccessToken(account: FirebaseServiceAccount): Promise<string | null> {
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 60_000) {
     return cachedAccessToken
   }
 
-  const saJson = Deno.env.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-  if (!saJson) return null
-
   try {
-    const sa = JSON.parse(saJson)
     const now = Math.floor(Date.now() / 1000)
-
-    // Create JWT for Google OAuth2 token exchange
-    const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }))
-    const payload = btoa(
-      JSON.stringify({
-        iss: sa.client_email,
-        scope: "https://www.googleapis.com/auth/firebase.messaging",
-        aud: "https://oauth2.googleapis.com/token",
-        iat: now,
-        exp: now + 3600,
-      }),
-    )
-
+    const header = encodeJson({ alg: "RS256", typ: "JWT" })
+    const payload = encodeJson({
+      iss: account.client_email,
+      scope: "https://www.googleapis.com/auth/firebase.messaging",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: now,
+      exp: now + 3600,
+    })
     const signingInput = `${header}.${payload}`
-
-    // Import the private key
-    const pemKey = sa.private_key
+    const pemKey = account.private_key
+      .replace(/\\n/g, "\n")
       .replace("-----BEGIN PRIVATE KEY-----", "")
       .replace("-----END PRIVATE KEY-----", "")
-      .replace(/\n/g, "")
-    const binaryKey = Uint8Array.from(atob(pemKey), (c) => c.charCodeAt(0))
-
+      .replace(/\s/g, "")
+    const binaryKey = Uint8Array.from(atob(pemKey), (character) => character.charCodeAt(0))
     const key = await crypto.subtle.importKey(
       "pkcs8",
       binaryKey,
@@ -74,69 +89,79 @@ async function getAccessToken(): Promise<string | null> {
       false,
       ["sign"],
     )
-
     const signature = await crypto.subtle.sign(
       "RSASSA-PKCS1-v1_5",
       key,
       new TextEncoder().encode(signingInput),
     )
+    const assertion = `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`
 
-    const jwt = `${signingInput}.${btoa(
-      String.fromCharCode(...new Uint8Array(signature)),
-    )}`
-
-    // Exchange JWT for access token
-    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }),
     })
+    if (!tokenResponse.ok) return null
 
-    if (!tokenRes.ok) return null
-
-    const tokenData = await tokenRes.json()
+    const tokenData = await tokenResponse.json()
+    if (typeof tokenData.access_token !== "string") return null
     cachedAccessToken = tokenData.access_token
-    tokenExpiresAt = Date.now() + (tokenData.expires_in || 3600) * 1000
+    tokenExpiresAt = Date.now() + Number(tokenData.expires_in || 3600) * 1000
     return cachedAccessToken
   } catch {
     return null
   }
 }
 
-/**
- * Send a push notification to a specific device token.
- */
-export async function sendPush(
+function isUnregisteredToken(responseBody: string): boolean {
+  try {
+    const parsed = JSON.parse(responseBody)
+    const error = parsed?.error
+    if (error?.status === "UNREGISTERED") return true
+    return Array.isArray(error?.details) && error.details.some(
+      (detail: Record<string, unknown>) => detail.errorCode === "UNREGISTERED",
+    )
+  } catch {
+    return false
+  }
+}
+
+export async function sendPushDetailed(
   token: string,
   payload: PushPayload,
-): Promise<boolean> {
-  const accessToken = await getAccessToken()
-  if (!accessToken) return false
+): Promise<PushSendResult> {
+  const account = loadServiceAccount()
+  if (!account) {
+    return {
+      ok: false,
+      staleToken: false,
+      error: Deno.env.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+        ? "firebase_service_account_invalid"
+        : "firebase_not_configured",
+    }
+  }
 
-  const saJson = Deno.env.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-  if (!saJson) return false
-
-  const sa = JSON.parse(saJson)
-  const projectId = sa.project_id
+  const accessToken = await getAccessToken(account)
+  if (!accessToken) {
+    return { ok: false, staleToken: false, error: "firebase_oauth_unavailable" }
+  }
 
   const message: FCMMessage = {
     message: {
       token,
       notification: { title: payload.title, body: payload.body },
       data: payload.data,
-      android: {
-        priority: "high",
-        notification: { channel_id: "fieldops_default" },
-      },
-      apns: {
-        payload: { aps: { sound: "default" } },
-      },
+      android: { priority: "HIGH" },
+      apns: { payload: { aps: { sound: "default" } } },
     },
   }
 
   try {
-    const res = await fetch(
-      `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+    const response = await fetch(
+      `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(account.project_id)}/messages:send`,
       {
         method: "POST",
         headers: {
@@ -147,76 +172,69 @@ export async function sendPush(
       },
     )
 
-    return res.ok
+    if (response.ok) return { ok: true, staleToken: false }
+    const responseBody = await response.text()
+    const staleToken = isUnregisteredToken(responseBody)
+    return {
+      ok: false,
+      staleToken,
+      error: staleToken ? "fcm_token_unregistered" : `fcm_http_${response.status}`,
+    }
   } catch {
-    return false
+    return { ok: false, staleToken: false, error: "fcm_network_unavailable" }
   }
 }
 
-/**
- * Send a push notification to all device tokens for a given user.
- * Stale tokens (404 from FCM) are automatically cleaned up.
- */
+export async function sendPush(token: string, payload: PushPayload): Promise<boolean> {
+  return (await sendPushDetailed(token, payload)).ok
+}
+
 export async function sendPushToUser(
   supabase: SupabaseClient,
   userId: string,
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number }> {
-  const { data: tokens } = await supabase
+  const { data: tokens, error } = await supabase
     .from("device_tokens")
     .select("id, token")
     .eq("user_id", userId)
-
-  if (!tokens || tokens.length === 0) return { sent: 0, failed: 0 }
+  if (error || !tokens?.length) return { sent: 0, failed: 0 }
 
   let sent = 0
   let failed = 0
   const staleIds: string[] = []
-
   for (const row of tokens) {
-    const ok = await sendPush(row.token, payload)
-    if (ok) {
-      sent++
-    } else {
-      failed++
-      staleIds.push(row.id)
-    }
+    const result = await sendPushDetailed(row.token, payload)
+    if (result.ok) sent++
+    else if (result.staleToken) staleIds.push(row.id)
+    else failed++
   }
 
-  // Clean up stale tokens (best-effort)
   if (staleIds.length > 0) {
     await supabase.from("device_tokens").delete().in("id", staleIds)
   }
-
   return { sent, failed }
 }
 
-/**
- * Send a push notification to all users in a company with a given role.
- */
 export async function sendPushToRole(
   supabase: SupabaseClient,
   companyId: string,
   role: string,
   payload: PushPayload,
 ): Promise<{ sent: number; failed: number }> {
-  // Get users with the target role in the company
   const { data: users } = await supabase
     .from("users")
     .select("id")
     .eq("company_id", companyId)
     .eq("role", role)
+  if (!users?.length) return { sent: 0, failed: 0 }
 
-  if (!users || users.length === 0) return { sent: 0, failed: 0 }
-
-  let totalSent = 0
-  let totalFailed = 0
-
+  let sent = 0
+  let failed = 0
   for (const user of users) {
     const result = await sendPushToUser(supabase, user.id, payload)
-    totalSent += result.sent
-    totalFailed += result.failed
+    sent += result.sent
+    failed += result.failed
   }
-
-  return { sent: totalSent, failed: totalFailed }
+  return { sent, failed }
 }

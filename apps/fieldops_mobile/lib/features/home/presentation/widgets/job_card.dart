@@ -6,7 +6,6 @@ import 'package:fieldops_mobile/features/camera/presentation/photo_drafts_screen
 import 'package:fieldops_mobile/features/clock/presentation/clock_in_controller.dart';
 import 'package:fieldops_mobile/features/expenses/presentation/expense_capture_screen.dart';
 import 'package:fieldops_mobile/features/jobs/domain/job_summary.dart';
-import 'package:fieldops_mobile/features/breadcrumbs/presentation/breadcrumb_playback_screen.dart';
 import 'package:fieldops_mobile/features/safety/presentation/safety_checklist_screen.dart';
 import 'package:fieldops_mobile/features/tasks/presentation/task_list_screen.dart';
 import 'package:fieldops_mobile/features/tasks/presentation/tasks_controller.dart';
@@ -304,42 +303,6 @@ class JobCard extends ConsumerWidget {
                     },
                     icon: const Icon(Icons.shield_rounded, size: 18),
                     label: const Text('Safety Checklist'),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: Semantics(
-                  button: true,
-                  label: 'View shift route for ${job.jobName}',
-                  child: OutlinedButton.icon(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: palette.steel,
-                      side: BorderSide(
-                        color: palette.steel.withValues(alpha: 0.2),
-                      ),
-                      minimumSize: const Size.fromHeight(44),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(22),
-                      ),
-                    ),
-                    onPressed: () {
-                      final today = DateTime.now();
-                      final shiftDate =
-                          '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => BreadcrumbPlaybackScreen(
-                            shiftDate: shiftDate,
-                            jobName: job.jobName,
-                            jobId: job.jobId,
-                          ),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.route_rounded, size: 18),
-                    label: const Text('View Route'),
                   ),
                 ),
               ),

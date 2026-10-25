@@ -5,8 +5,25 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Release credentials come from an untracked Gradle property or environment
+// variables. Never fall back to the debug keystore for a distributable build.
+val releaseStoreFile = providers.gradleProperty("POLLO_RELEASE_STORE_FILE")
+    .orElse(providers.environmentVariable("POLLO_RELEASE_STORE_FILE"))
+val releaseStorePassword = providers.gradleProperty("POLLO_RELEASE_STORE_PASSWORD")
+    .orElse(providers.environmentVariable("POLLO_RELEASE_STORE_PASSWORD"))
+val releaseKeyAlias = providers.gradleProperty("POLLO_RELEASE_KEY_ALIAS")
+    .orElse(providers.environmentVariable("POLLO_RELEASE_KEY_ALIAS"))
+val releaseKeyPassword = providers.gradleProperty("POLLO_RELEASE_KEY_PASSWORD")
+    .orElse(providers.environmentVariable("POLLO_RELEASE_KEY_PASSWORD"))
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { it.isPresent }
+
 android {
-    namespace = "ai.fieldops.fieldops_mobile"
+    namespace = "com.pollomovil.mobile"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,10 +37,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "ai.fieldops.fieldops_mobile"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        applicationId = "com.pollomovil.mobile"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -32,9 +46,18 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.create("polloRelease") {
+                    storeFile = file(releaseStoreFile.get())
+                    storePassword = releaseStorePassword.get()
+                    keyAlias = releaseKeyAlias.get()
+                    keyPassword = releaseKeyPassword.get()
+                }
+            } else {
+                // Keep local release artifacts unsigned until a private signing
+                // key is configured; never package them with the debug key.
+                signingConfig = null
+            }
         }
     }
 }

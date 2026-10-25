@@ -1,14 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 
-/**
- * Sentry DSN for the web app ("fieldops-web" key on the shared
- * bbr-technology/fieldops-mobile project). DSNs are publishable
- * identifiers — safe to commit. NEXT_PUBLIC_SENTRY_DSN still wins when set
- * so staging/self-hosted can point elsewhere without a code change.
- */
-export const SENTRY_DSN =
-  process.env.NEXT_PUBLIC_SENTRY_DSN ||
-  "https://ecd82d398110ddd62deec395a3a50147@o4511242297540608.ingest.us.sentry.io/4511242378018816";
+/** Error reporting is opt-in and must point to the Pollo Móvil deployment. */
+export const SENTRY_DSN = process.env.NEXT_PUBLIC_SENTRY_DSN || "";
 
 interface ReportContext {
   /** Where it happened, e.g. "permits.loadJobs" or "workers.loadWorkers". */
