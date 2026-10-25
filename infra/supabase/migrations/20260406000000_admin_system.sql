@@ -2,6 +2,11 @@
 -- Admin System: Company Management, Platform Admin, Audit Trail
 -- ═══════════════════════════════════════════════════════════
 
+-- pgcrypto is installed in Supabase's extensions schema. Keep this migration
+-- self-contained and schema-qualify its functions; db push may use a role whose
+-- search_path does not include extensions.
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
 -- ─── 1. Extend companies table ──────────────────────────────
 
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS industry text;
@@ -66,7 +71,7 @@ CREATE TABLE IF NOT EXISTS platform_admins (
 CREATE TABLE IF NOT EXISTS platform_admin_invites (
   id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   email        text        NOT NULL,
-  invite_token text        NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(32), 'hex'),
+  invite_token text        NOT NULL UNIQUE DEFAULT encode(extensions.gen_random_bytes(32), 'hex'),
   expires_at   timestamptz NOT NULL DEFAULT (NOW() + INTERVAL '7 days'),
   claimed_at   timestamptz,
   created_by   uuid        REFERENCES platform_admins(id),
