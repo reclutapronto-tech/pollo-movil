@@ -3,10 +3,6 @@ name: Timefold - Solver service
 on:
   pull_request:
     branches: [main]
-    paths:
-      - ".github/workflows/timefold-solver.yml"
-      - "infra/timefold/**"
-      - "!infra/timefold/**/*.md"
   push:
     branches: [pollo-movil]
     paths:
