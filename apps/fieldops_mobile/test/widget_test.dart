@@ -63,7 +63,7 @@ void main() {
     expect(find.byType(NavigationBar), findsOneWidget);
     expect(
       tester.widget<NavigationBar>(find.byType(NavigationBar)).destinations,
-      hasLength(5),
+      hasLength(4),
     );
   });
 
@@ -104,11 +104,11 @@ void main() {
     final initialNavigation = tester.widget<NavigationBar>(
       find.byType(NavigationBar),
     );
-    expect(initialNavigation.destinations, hasLength(5));
+    expect(initialNavigation.destinations, hasLength(4));
     expect(initialNavigation.selectedIndex, 0);
 
     final initialLabels = _navigationLabels(tester);
-    expect(initialLabels, hasLength(5));
+    expect(initialLabels, hasLength(4));
     await tester.tap(find.text(initialLabels[1]));
     await tester.pumpAndSettle();
     expect(
