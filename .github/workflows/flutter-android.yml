@@ -24,6 +24,9 @@ jobs:
     # Pin to 22.04 while the upstream runner issue remains open.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
+    env:
+      POLLO_MOBILE_PILOT_SUPABASE_URL: ${{ vars.POLLO_MOBILE_PILOT_SUPABASE_URL }}
+      POLLO_MOBILE_PILOT_SUPABASE_ANON_KEY: ${{ vars.POLLO_MOBILE_PILOT_SUPABASE_ANON_KEY }}
     defaults:
       run:
         working-directory: apps/fieldops_mobile
@@ -90,7 +93,18 @@ jobs:
           df -h "$GITHUB_WORKSPACE"
 
       - name: Build Android APK
-        run: flutter build apk --debug
+        run: |
+          if [ -z "$POLLO_MOBILE_PILOT_SUPABASE_URL" ] || [ -z "$POLLO_MOBILE_PILOT_SUPABASE_ANON_KEY" ]; then
+            echo "::error::Configure the pilot Supabase URL and publishable key as repository Actions variables."
+            exit 1
+          fi
+          if [ "$POLLO_MOBILE_PILOT_SUPABASE_URL" != "https://ghirxpsuobbzaokjnrbt.supabase.co" ]; then
+            echo "::error::The Android pilot build must target the authorized Pollo Móvil Supabase project."
+            exit 1
+          fi
+          flutter build apk --debug \
+            --dart-define="SUPABASE_URL=$POLLO_MOBILE_PILOT_SUPABASE_URL" \
+            --dart-define="SUPABASE_ANON_KEY=$POLLO_MOBILE_PILOT_SUPABASE_ANON_KEY"
 
       - name: Enable KVM access for the Android emulator
         run: |
@@ -108,7 +122,7 @@ jobs:
           disk-size: 4G
           emulator-boot-timeout: 300
           disable-animations: true
-          script: cd "$GITHUB_WORKSPACE/apps/fieldops_mobile" && adb logcat -c && adb install -r build/app/outputs/flutter-apk/app-debug.apk && timeout 600s flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded
+          script: cd "$GITHUB_WORKSPACE/apps/fieldops_mobile" && adb logcat -c && adb install -r build/app/outputs/flutter-apk/app-debug.apk && timeout 600s flutter test --dart-define="SUPABASE_URL=$POLLO_MOBILE_PILOT_SUPABASE_URL" --dart-define="SUPABASE_ANON_KEY=$POLLO_MOBILE_PILOT_SUPABASE_ANON_KEY" integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded
 
       - name: Collect Android emulator log
         if: always()
