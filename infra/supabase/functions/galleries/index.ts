@@ -4,6 +4,7 @@
 //
 // Pattern: mirrors client_portal for the public read flow and media_finalize
 // for the authenticated write flow. Password hashing uses bcryptjs via esm.sh.
+import { getSupabasePublishableKey, getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4"
@@ -70,8 +71,8 @@ serve(async (req) => {
   logRequestStart(ENDPOINT, requestId, req)
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") || ""
-  const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || ""
+  const supabaseServiceKey = getSupabaseSecretKey() || ""
+  const supabaseAnonKey = getSupabasePublishableKey() || ""
   const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
 
   const url = new URL(req.url)

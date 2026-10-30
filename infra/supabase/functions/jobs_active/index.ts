@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4"
 import { corsHeaders, errorResponse, jsonResponse, logRequestError, logRequestResult, logRequestStart, makeRequestId } from "../_shared/api.ts"
+import { getSupabasePublishableKey } from "../_shared/supabase-admin-key.ts"
 
 const ENDPOINT = "jobs_active"
 
@@ -23,7 +24,7 @@ serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || ''
-    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') || ''
+    const supabaseAnonKey = getSupabasePublishableKey()
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: { Authorization: authHeader }

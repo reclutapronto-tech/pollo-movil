@@ -1,3 +1,4 @@
+import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
@@ -48,7 +49,7 @@ serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || ""
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+    const supabaseServiceKey = getSupabaseSecretKey() || ""
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
 
     const results: Array<{ id: string; type: string; status: "completed" | "failed"; error?: string }> = []
