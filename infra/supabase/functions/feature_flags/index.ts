@@ -5,6 +5,7 @@
 //   POST   — set a company override for a flag (admin only)
 //   DELETE — remove a company override, reverting to global default (admin only)
 
+import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import {
@@ -76,7 +77,7 @@ Deno.serve(async (req) => {
         return errorResponse(requestId, 500, "QUERY_FAILED", "Failed to fetch feature flags")
       }
 
-      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+      const supabaseServiceKey = getSupabaseSecretKey() || ""
       const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
 
       const { data: overrides, error: overridesErr } = await supabaseAdmin
@@ -140,7 +141,7 @@ Deno.serve(async (req) => {
         return errorResponse(requestId, 404, "NOT_FOUND", `Flag '${flagKey}' does not exist`)
       }
 
-      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+      const supabaseServiceKey = getSupabaseSecretKey() || ""
       const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
 
       const { error: upsertErr } = await supabaseAdmin
@@ -176,7 +177,7 @@ Deno.serve(async (req) => {
         return errorResponse(requestId, 403, "FEATURE_DISABLED", "Continuous GPS tracking cannot be enabled in Pollo Móvil.")
       }
 
-      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+      const supabaseServiceKey = getSupabaseSecretKey() || ""
       const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
 
       const { error: deleteErr } = await supabaseAdmin

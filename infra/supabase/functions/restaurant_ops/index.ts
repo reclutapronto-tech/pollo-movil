@@ -1,3 +1,4 @@
+import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.4"
@@ -829,7 +830,7 @@ serve(async (req) => {
     if (!authorization?.startsWith("Bearer ")) fail(401, "UNAUTHORIZED", "Sign in to continue.")
     const url = Deno.env.get("SUPABASE_URL") ?? ""
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? ""
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+    const serviceKey = getSupabaseSecretKey() ?? ""
     if (!url || !anonKey || !serviceKey) throw new Error("Supabase server configuration is missing.")
     const userClient = createClient(url, anonKey, { global: { headers: { Authorization: authorization } } })
     const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })

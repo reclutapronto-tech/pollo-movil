@@ -1,3 +1,4 @@
+import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import Stripe from "npm:stripe@18.5.0"
@@ -25,7 +26,7 @@ serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || ""
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""
+    const supabaseServiceKey = getSupabaseSecretKey() || ""
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || ""
     const stripeSecretKey = Deno.env.get("STRIPE_SECRET_KEY") || ""
     const appUrl = Deno.env.get("APP_URL") || ""

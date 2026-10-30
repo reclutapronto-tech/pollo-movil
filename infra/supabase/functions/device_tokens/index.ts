@@ -5,6 +5,7 @@
 //   POST unregister — remove device token (on sign-out)
 //   GET  list       — list tokens for a user (admin/supervisor only)
 
+import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import {
   corsHeaders,
@@ -54,7 +55,7 @@ Deno.serve(async (req) => {
     // role with explicit company scoping rather than leaning on the JWT.
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      getSupabaseSecretKey()!,
     )
     const { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")

@@ -55,6 +55,7 @@ jobs:
       - name: Run Edge Function unit tests
         run: |
           deno test --allow-env --allow-net --allow-read \
+            infra/supabase/functions/_shared/supabase-admin-key_test.ts \
             infra/supabase/functions/_shared/restaurant-optimizer_test.ts \
             infra/supabase/functions/_shared/timefold-client_test.ts \
             infra/supabase/functions/tags/index_test.ts \
@@ -104,7 +105,7 @@ jobs:
           cat > "$RUNNER_TEMP/restaurant-ops.env" <<EOF
           SUPABASE_URL=http://kong:8000
           SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
-          SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY
+          SUPABASE_SECRET_KEYS={"default":"$SUPABASE_SERVICE_ROLE_KEY"}
           TIMEFOLD_SERVICE_URL=http://timefold:8080/api/assignments/solve
           TIMEFOLD_SERVICE_TOKEN=$timefold_token
           EOF
