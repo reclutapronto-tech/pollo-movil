@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
+import io.smallrye.common.annotation.Blocking;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import ai.timefold.solver.core.api.solver.SolverJob;
@@ -36,6 +37,7 @@ public class MealPlanOptimizationResource {
 
     @POST
     @Path("/solve")
+    @Blocking
     public Response solve(MealPlanSolution input, @HeaderParam("Authorization") String authorization) {
         if (!isAuthorized(authorization)) return Response.status(Response.Status.UNAUTHORIZED).build();
         if (input == null || input.getWorkers() == null || input.getWorkers().isEmpty()

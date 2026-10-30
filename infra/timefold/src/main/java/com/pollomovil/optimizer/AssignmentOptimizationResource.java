@@ -11,6 +11,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 
+import io.smallrye.common.annotation.Blocking;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import ai.timefold.solver.core.api.solver.SolverJob;
@@ -46,6 +47,7 @@ public class AssignmentOptimizationResource {
 
     @POST
     @Path("/solve")
+    @Blocking
     public Response solve(AssignmentProblem input, @HeaderParam("Authorization") String authorization) {
         if (!isAuthorized(authorization)) return Response.status(Response.Status.UNAUTHORIZED).build();
         if (!isValidInput(input)) {
