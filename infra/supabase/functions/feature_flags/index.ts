@@ -5,7 +5,7 @@
 //   POST   — set a company override for a flag (admin only)
 //   DELETE — remove a company override, reverting to global default (admin only)
 
-import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
+import { getSupabasePublishableKey, getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
 import {
@@ -36,7 +36,7 @@ Deno.serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || ""
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || ""
+    const supabaseAnonKey = getSupabasePublishableKey() || ""
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
     })

@@ -33,3 +33,37 @@ export function resolveSupabaseSecretKey(rawSecretKeys: string | undefined): str
 export function getSupabaseSecretKey(): string {
   return resolveSupabaseSecretKey(Deno.env.get("SUPABASE_SECRET_KEYS"));
 }
+
+/**
+ * Resolves the current Supabase publishable API key. Edge Functions use this
+ * key for requests carrying an end-user JWT; privileged operations use the
+ * secret key above.
+ */
+export function resolveSupabasePublishableKey(rawPublishableKeys: string | undefined): string {
+  if (!rawPublishableKeys) {
+    throw new Error("Supabase publishable API key configuration is missing.");
+  }
+
+  let publishableKeys: unknown;
+  try {
+    publishableKeys = JSON.parse(rawPublishableKeys);
+  } catch {
+    throw new Error("Supabase publishable API key configuration is invalid.");
+  }
+
+  if (
+    typeof publishableKeys !== "object" ||
+    publishableKeys === null ||
+    !("default" in publishableKeys) ||
+    typeof publishableKeys.default !== "string" ||
+    publishableKeys.default.length === 0
+  ) {
+    throw new Error("The default Supabase publishable API key is not configured.");
+  }
+
+  return publishableKeys.default;
+}
+
+export function getSupabasePublishableKey(): string {
+  return resolveSupabasePublishableKey(Deno.env.get("SUPABASE_PUBLISHABLE_KEYS"));
+}

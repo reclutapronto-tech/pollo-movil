@@ -1,7 +1,7 @@
 // tags — photo tag CRUD, autocomplete, and job-scoped listing.
 // Pattern: mirrors client_portal/index.ts for auth + structured logging,
 // media_finalize/index.ts for idempotency on mutations.
-import { getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
+import { getSupabasePublishableKey, getSupabaseSecretKey } from "../_shared/supabase-admin-key.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.4"
@@ -43,7 +43,7 @@ serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") || ""
     const supabaseServiceKey = getSupabaseSecretKey() || ""
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || ""
+    const supabaseAnonKey = getSupabasePublishableKey() || ""
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },

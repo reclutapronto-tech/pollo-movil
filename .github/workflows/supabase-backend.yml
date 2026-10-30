@@ -106,6 +106,7 @@ jobs:
           SUPABASE_URL=http://kong:8000
           SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
           SUPABASE_SECRET_KEYS={"default":"$SUPABASE_SERVICE_ROLE_KEY"}
+          SUPABASE_PUBLISHABLE_KEYS={"default":"$SUPABASE_ANON_KEY"}
           TIMEFOLD_SERVICE_URL=http://timefold:8080/api/assignments/solve
           TIMEFOLD_SERVICE_TOKEN=$timefold_token
           EOF
