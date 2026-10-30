@@ -3,10 +3,6 @@ name: Flutter - iOS Simulator
 on:
   pull_request:
     branches: [main]
-    paths:
-      - ".github/workflows/flutter-ios.yml"
-      - "apps/fieldops_mobile/**"
-      - "!apps/fieldops_mobile/**/*.md"
   push:
     branches: [pollo-movil]
     paths:
